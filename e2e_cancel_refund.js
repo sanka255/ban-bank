@@ -16,7 +16,7 @@ function req(path, token, method='GET', body){
 (async ()=>{
   try{
     console.log('Login admin');
-    const login = await req('/api/auth/login', null, 'POST', { username: 'admin', password: 'admi123' });
+    const login = await req('/api/auth/login', null, 'POST', { username: 'admin', password: '123' });
     if (login.status !== 200) throw new Error('Login failed: ' + login.body);
     const token = JSON.parse(login.body).token;
 
