@@ -1,0 +1,271 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum HallPartitionStatus {
+  active
+  inactive
+  maintenance
+}
+
+enum BanquetReservationStatus {
+  tentative
+  guaranteed
+  in_progress
+  completed
+  cancelled
+  postponed
+}
+
+enum BanquetDateSlotStatus {
+  active
+  cancelled
+  postponed
+}
+
+enum GuestBillLineType {
+  hall_charge
+  item
+  menu
+  package
+  extra
+}
+
+model BanquetHall {
+  id            Int            @id @default(autoincrement())
+  name          String
+  maxGuests     Int?
+  isPartitioned Boolean        @default(false)
+  partitions    HallPartition[]
+}
+
+model HallPartition {
+  id        Int                 @id @default(autoincrement())
+  hallId    Int
+  hall      BanquetHall         @relation(fields: [hallId], references: [id])
+  name      String
+  status    HallPartitionStatus @default(active)
+  accountNo String?
+  rates     HallRate[]
+  dateSlots BanquetDateSlot[]
+}
+
+model PaxRange {
+  id        Int       @id @default(autoincrement())
+  minGuests Int
+  maxGuests Int
+  hallRates HallRate[]
+}
+
+model HallRate {
+  id          Int           @id @default(autoincrement())
+  partitionId Int
+  partition   HallPartition @relation(fields: [partitionId], references: [id])
+  paxRangeId  Int
+  paxRange    PaxRange      @relation(fields: [paxRangeId], references: [id])
+  charge      Decimal       @db.Decimal(10, 2)
+}
+
+model FunctionAccount {
+  id           Int                  @id @default(autoincrement())
+  name         String
+  departmentId Int?
+  reservations BanquetReservation[]
+}
+
+model TravelAgent {
+  id               Int          @id @default(autoincrement())
+  company          String
+  contactInfo      String?
+  vatRegNo         String?
+  creditLimit      Decimal?     @db.Decimal(10, 2)
+  creditPeriodDays Int?
+  isActive         Boolean      @default(true)
+  guests           BanquetGuest[]
+}
+
+model BanquetGuest {
+  id            Int                 @id @default(autoincrement())
+  title         String?
+  firstName     String
+  lastName      String?
+  phone         String?
+  email         String?
+  company       String?
+  country       String?
+  travelAgentId Int?
+  travelAgent   TravelAgent?        @relation(fields: [travelAgentId], references: [id])
+  reservations  BanquetReservation[]
+}
+
+model BanquetReservation {
+  id                   Int                      @id @default(autoincrement())
+  reservationCode      String                   @unique
+  guestId              Int
+  guest                BanquetGuest             @relation(fields: [guestId], references: [id])
+  functionAccountId    Int?
+  functionAccount      FunctionAccount?         @relation(fields: [functionAccountId], references: [id])
+  numberOfGuests       Int
+  discussedBy          String?
+  broughtBy            String?
+  status               BanquetReservationStatus @default(tentative)
+  isComplementary      Boolean                  @default(false)
+  complementaryReason  String?
+  invoiceNo            String?
+  createdBy            Int
+  createdAt            DateTime                 @default(now())
+  dateSlots            BanquetDateSlot[]
+  deposits             HallDeposit[]
+  withdrawals          HallWithdrawal[]
+  guestBillLines       GuestBillLine[]
+}
+
+model BanquetDateSlot {
+  id                 Int                   @id @default(autoincrement())
+  reservationId      Int
+  reservation        BanquetReservation    @relation(fields: [reservationId], references: [id])
+  partitionId        Int
+  partition          HallPartition         @relation(fields: [partitionId], references: [id])
+  fromDate           DateTime              @db.Date
+  toDate             DateTime              @db.Date
+  fromTime           DateTime              @db.Time
+  toTime             DateTime              @db.Time
+  charge             Decimal               @db.Decimal(10, 2)
+  status             BanquetDateSlotStatus @default(active)
+  requestedItems     RequestedItem[]
+  requestedMenuItems RequestedMenuItem[]
+  guestBillLines     GuestBillLine[]
+  withdrawals        HallWithdrawal[]
+}
+
+model MenuCategory {
+  id    Int        @id @default(autoincrement())
+  name  String
+  items MenuItem[]
+}
+
+model MenuItem {
+  id                 Int                 @id @default(autoincrement())
+  name               String
+  categoryId         Int
+  category           MenuCategory        @relation(fields: [categoryId], references: [id])
+  menuId             Int?
+  menu               Menu?               @relation(fields: [menuId], references: [id])
+  isActive           Boolean             @default(true)
+  charge             Decimal             @db.Decimal(10, 2)
+  accountNo          String?
+  requestedItems     RequestedItem[]
+  requestedMenuItems RequestedMenuItem[]
+}
+
+model Menu {
+  id       Int       @id @default(autoincrement())
+  name     String
+  accountId String?
+  isActive Boolean   @default(true)
+  items    MenuItem[]
+  rates    MenuRate[]
+}
+
+model MenuRatePlan {
+  id       Int       @id @default(autoincrement())
+  fromDate DateTime  @db.Date
+  toDate   DateTime  @db.Date
+  isActive Boolean   @default(true)
+  rates    MenuRate[]
+}
+
+model MenuRate {
+  id         Int          @id @default(autoincrement())
+  ratePlanId Int
+  ratePlan   MenuRatePlan @relation(fields: [ratePlanId], references: [id])
+  menuId     Int
+  menu       Menu         @relation(fields: [menuId], references: [id])
+  charge     Decimal      @db.Decimal(10, 2)
+}
+
+model RequestedItem {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  itemId          Int
+  item            MenuItem        @relation(fields: [itemId], references: [id])
+  quantity        Decimal         @db.Decimal(10, 2)
+  unitPrice       Decimal         @db.Decimal(10, 2)
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
+}
+
+model RequestedMenuItem {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  menuItemId      Int
+  menuItem        MenuItem        @relation(fields: [menuItemId], references: [id])
+  guestCount      Int?
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
+}
+
+model GuestBillLine {
+  id            Int                 @id @default(autoincrement())
+  reservationId Int
+  reservation   BanquetReservation  @relation(fields: [reservationId], references: [id])
+  dateSlotId    Int?
+  dateSlot      BanquetDateSlot?    @relation(fields: [dateSlotId], references: [id])
+  billNo        String
+  lineType      GuestBillLineType
+  description   String
+  charge        Decimal            @db.Decimal(15, 2)
+  taxAmount     Decimal            @db.Decimal(15, 2)
+  chargeWithTax Decimal            @db.Decimal(15, 2)
+  fromPms       Boolean            @default(false)
+  insertDate    DateTime           @db.Date
+  userId        Int
+  createdAt     DateTime           @default(now())
+}
+
+model HallDeposit {
+  id            Int                @id @default(autoincrement())
+  reservationId Int
+  reservation   BanquetReservation @relation(fields: [reservationId], references: [id])
+  amount        Decimal            @db.Decimal(10, 2)
+  paymentMethod String
+  currencyId    Int?
+  settled       Boolean            @default(false)
+  receiptNo     String?
+  insertDate    DateTime           @default(now())
+  remark        String?
+}
+
+model HallCancellationTier {
+  id        Int             @id @default(autoincrement())
+  daysMin   Int
+  daysMax   Int
+  refundPct Decimal         @db.Decimal(5, 2)
+  withdrawals HallWithdrawal[]
+}
+
+model HallWithdrawal {
+  id               Int                  @id @default(autoincrement())
+  reservationId    Int
+  reservation      BanquetReservation   @relation(fields: [reservationId], references: [id])
+  dateSlotId       Int?
+  dateSlot         BanquetDateSlot?     @relation(fields: [dateSlotId], references: [id])
+  tierIdApplied    Int?
+  tier             HallCancellationTier? @relation(fields: [tierIdApplied], references: [id])
+  withdrawalDate   DateTime             @default(now())
+  refundableAmount Decimal              @db.Decimal(10, 2)
+  refundPercentage Decimal
+  cancellationFee  Decimal              @db.Decimal(10, 2)
+  fullCharge       Decimal              @db.Decimal(10, 2)
+  userId           Int
+  reason           String?
+}

@@ -1,0 +1,413 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum HallPartitionStatus {
+  active
+  inactive
+  maintenance
+}
+
+enum BanquetReservationStatus {
+  tentative
+  guaranteed
+  in_progress
+  completed
+  cancelled
+  postponed
+}
+
+enum BanquetDateSlotStatus {
+  active
+  cancelled
+  postponed
+}
+
+enum GuestBillLineType {
+  hall_charge
+  item
+  menu
+  package
+  extra
+}
+
+enum PaymentStatus {
+  pending
+  captured
+  failed
+  refunded
+  partially_refunded
+}
+
+enum GLAccountType {
+  asset
+  liability
+  equity
+  revenue
+  expense
+}
+
+enum GLEntryType {
+  debit
+  credit
+}
+
+model BanquetHall {
+  id            Int             @id @default(autoincrement())
+  legacyId      Int?            @unique
+  name          String
+  maxGuests     Int?
+  isPartitioned Boolean         @default(false)
+  partitions    HallPartition[]
+}
+
+model HallPartition {
+  id        Int                 @id @default(autoincrement())
+  legacyId  Int?                @unique
+  hallId    Int
+  hall      BanquetHall         @relation(fields: [hallId], references: [id])
+  name      String
+  status    HallPartitionStatus @default(active)
+  accountNo String?
+  rates     HallRate[]
+  dateSlots BanquetDateSlot[]
+}
+
+model PaxRange {
+  id        Int        @id @default(autoincrement())
+  legacyId  Int?       @unique
+  minGuests Int
+  maxGuests Int
+  hallRates HallRate[]
+}
+
+model HallRate {
+  id          Int           @id @default(autoincrement())
+  legacyId    Int?          @unique
+  partitionId Int
+  partition   HallPartition @relation(fields: [partitionId], references: [id])
+  paxRangeId  Int
+  paxRange    PaxRange      @relation(fields: [paxRangeId], references: [id])
+  charge      Decimal       @db.Decimal(10, 2)
+}
+
+model FunctionAccount {
+  id           Int                  @id @default(autoincrement())
+  legacyId     Int?                 @unique
+  name         String
+  departmentId Int?
+  reservations BanquetReservation[]
+}
+
+model ChartOfAccount {
+  id          Int          @id @default(autoincrement())
+  accountNo   String       @unique
+  name        String
+  accountType GLAccountType
+  isActive    Boolean      @default(true)
+  glEntries   GLEntry[]
+  mappings    AccountMapping[]
+}
+
+model GLEntry {
+  id          Int             @id @default(autoincrement())
+  accountId   Int
+  account     ChartOfAccount  @relation(fields: [accountId], references: [id])
+  entryType   GLEntryType
+  amount      Decimal         @db.Decimal(15, 2)
+  sourceType  String
+  sourceId    Int
+  description String
+  postedAt    DateTime        @default(now())
+  postedBy    Int
+}
+
+model AccountMapping {
+  id          Int             @id @default(autoincrement())
+  mappingType String
+  sourceId    Int?
+  accountId   Int
+  account     ChartOfAccount  @relation(fields: [accountId], references: [id])
+}
+
+model Currency {
+  id               Int            @id @default(autoincrement())
+  code             String         @unique
+  name             String
+  symbol           String
+  isActive         Boolean        @default(true)
+  rates            ExchangeRate[]
+  hallDeposits     HallDeposit[]  @relation("CurrencyHallDeposit")
+  paymentTransactions PaymentTransaction[] @relation("CurrencyPaymentTransaction")
+}
+
+model ExchangeRate {
+  id            Int      @id @default(autoincrement())
+  currencyId    Int
+  currency      Currency @relation(fields: [currencyId], references: [id])
+  rateToBase    Decimal  @db.Decimal(12, 6)
+  effectiveDate DateTime @db.Date
+  createdBy     Int
+  createdAt     DateTime @default(now())
+
+  @@unique([currencyId, effectiveDate])
+}
+
+model TravelAgent {
+  id               Int            @id @default(autoincrement())
+  legacyId         Int?           @unique
+  company          String
+  contactInfo      String?
+  vatRegNo         String?
+  creditLimit      Decimal?       @db.Decimal(10, 2)
+  creditPeriodDays Int?
+  isActive         Boolean        @default(true)
+  guests           BanquetGuest[]
+}
+
+model BanquetGuest {
+  id                  Int                  @id @default(autoincrement())
+  legacyId            Int?                 @unique
+  title               String?
+  firstName           String
+  lastName            String?
+  phone               String?
+  email               String?
+  company             String?
+  country             String?
+  travelAgentId       Int?
+  travelAgent         TravelAgent?         @relation(fields: [travelAgentId], references: [id])
+  reservations        BanquetReservation[]
+  savedPaymentMethods SavedPaymentMethod[]
+}
+
+model BanquetReservation {
+  id                  Int                      @id @default(autoincrement())
+  legacyId            Int?                     @unique
+  reservationCode     String                   @unique
+  legacyReference     String?
+  guestId             Int
+  guest               BanquetGuest             @relation(fields: [guestId], references: [id])
+  functionAccountId   Int?
+  functionAccount     FunctionAccount?         @relation(fields: [functionAccountId], references: [id])
+  numberOfGuests      Int
+  discussedBy         String?
+  broughtBy           String?
+  status              BanquetReservationStatus @default(tentative)
+  isComplementary     Boolean                  @default(false)
+  complementaryReason String?
+  invoiceNo           String?
+  createdBy           Int
+  createdAt           DateTime                 @default(now())
+  dateSlots           BanquetDateSlot[]
+  deposits            HallDeposit[]
+  withdrawals         HallWithdrawal[]
+  guestBillLines      GuestBillLine[]
+  paymentTransactions PaymentTransaction[]
+}
+
+model BanquetDateSlot {
+  id                 Int                   @id @default(autoincrement())
+  legacyId           Int?                  @unique
+  reservationId      Int
+  reservation        BanquetReservation    @relation(fields: [reservationId], references: [id])
+  partitionId        Int
+  partition          HallPartition         @relation(fields: [partitionId], references: [id])
+  fromDate           DateTime              @db.Date
+  toDate             DateTime              @db.Date
+  fromTime           DateTime              @db.Time
+  toTime             DateTime              @db.Time
+  charge             Decimal               @db.Decimal(10, 2)
+  status             BanquetDateSlotStatus @default(active)
+  requestedItems     RequestedItem[]
+  requestedMenuItems RequestedMenuItem[]
+  guestBillLines     GuestBillLine[]
+  withdrawals        HallWithdrawal[]
+}
+
+model MenuCategory {
+  id    Int        @id @default(autoincrement())
+  name  String
+  items MenuItem[]
+}
+
+model MenuItem {
+  id             Int             @id @default(autoincrement())
+  name           String
+  categoryId     Int
+  category       MenuCategory    @relation(fields: [categoryId], references: [id])
+  charge         Decimal         @db.Decimal(10, 2)
+  accountNo      String?
+  isActive       Boolean         @default(true)
+  menuLinks      MenuToItem[]
+  requestedItems RequestedItem[]
+}
+
+model Menu {
+  id             Int                @id @default(autoincrement())
+  name           String
+  accountId      String?
+  isActive       Boolean            @default(true)
+  items          MenuToItem[]
+  rates          MenuRate[]
+  requestedMenus RequestedMenuItem[]
+}
+
+model MenuToItem {
+  id     Int      @id @default(autoincrement())
+  menuId Int
+  menu   Menu     @relation(fields: [menuId], references: [id])
+  itemId Int
+  item   MenuItem @relation(fields: [itemId], references: [id])
+
+  @@unique([menuId, itemId])
+}
+
+model MenuRatePlan {
+  id       Int        @id @default(autoincrement())
+  name     String
+  fromDate DateTime   @db.Date
+  toDate   DateTime   @db.Date
+  isActive Boolean    @default(true)
+  rates    MenuRate[]
+}
+
+model MenuRate {
+  id         Int          @id @default(autoincrement())
+  ratePlanId Int
+  ratePlan   MenuRatePlan @relation(fields: [ratePlanId], references: [id])
+  menuId     Int
+  menu       Menu         @relation(fields: [menuId], references: [id])
+  charge     Decimal      @db.Decimal(10, 2)
+
+  @@unique([ratePlanId, menuId])
+}
+
+model RequestedItem {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  itemId          Int
+  item            MenuItem        @relation(fields: [itemId], references: [id])
+  quantity        Decimal         @db.Decimal(10, 2)
+  unitPrice       Decimal         @db.Decimal(10, 2)
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
+}
+
+model RequestedMenuItem {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  menuId          Int
+  menu            Menu            @relation(fields: [menuId], references: [id])
+  guestCount      Int
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
+}
+
+model GuestBillLine {
+  id            Int                @id @default(autoincrement())
+  legacyId      Int?               @unique
+  reservationId Int
+  reservation   BanquetReservation @relation(fields: [reservationId], references: [id])
+  dateSlotId    Int?
+  dateSlot      BanquetDateSlot?   @relation(fields: [dateSlotId], references: [id])
+  billNo        String
+  lineType      GuestBillLineType
+  description   String
+  charge        Decimal            @db.Decimal(15, 2)
+  taxAmount     Decimal            @db.Decimal(15, 2)
+  chargeWithTax Decimal            @db.Decimal(15, 2)
+  fromPms       Boolean            @default(false)
+  insertDate    DateTime           @db.Date
+  userId        Int
+  createdAt     DateTime           @default(now())
+}
+
+model HallDeposit {
+  id                 Int                @id @default(autoincrement())
+  legacyId           Int?               @unique
+  reservationId      Int
+  reservation        BanquetReservation @relation(fields: [reservationId], references: [id])
+  amount             Decimal            @db.Decimal(10, 2)
+  paymentMethod      String
+  currencyId         Int?
+  currency           Currency?          @relation("CurrencyHallDeposit", fields: [currencyId], references: [id])
+  baseCurrencyAmount Decimal            @db.Decimal(10, 2)
+  exchangeRateUsed   Decimal            @db.Decimal(12, 6)
+  settled            Boolean            @default(false)
+  receiptNo          String?
+  insertDate         DateTime           @default(now())
+  remark             String?
+  paymentTransactions PaymentTransaction[]
+}
+
+model PaymentTransaction {
+  id                 Int                  @id @default(autoincrement())
+  depositId          Int?
+  deposit            HallDeposit?         @relation(fields: [depositId], references: [id])
+  reservationId      Int
+  reservation        BanquetReservation   @relation(fields: [reservationId], references: [id])
+  gatewayProvider    String
+  gatewayRef         String               @unique
+  amount             Decimal              @db.Decimal(10, 2)
+  currencyId         Int?
+  currency           Currency?            @relation("CurrencyPaymentTransaction", fields: [currencyId], references: [id])
+  baseCurrencyAmount Decimal              @db.Decimal(10, 2)
+  exchangeRateUsed   Decimal              @db.Decimal(12, 6)
+  currencyCode       String               @default("LKR")
+  status             PaymentStatus        @default(pending)
+  failureReason      String?
+  webhookVerified    Boolean              @default(false)
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+}
+
+model SavedPaymentMethod {
+  id          Int          @id @default(autoincrement())
+  guestId     Int
+  guest       BanquetGuest @relation(fields: [guestId], references: [id])
+  gatewayProvider String
+  gatewayToken String
+  cardLast4   String?
+  cardBrand   String?
+  expiryMonth Int?
+  expiryYear  Int?
+  isActive    Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+}
+
+model HallCancellationTier {
+  id         Int             @id @default(autoincrement())
+  legacyId   Int?            @unique
+  daysMin    Int
+  daysMax    Int
+  refundPct  Decimal         @db.Decimal(5, 2)
+  withdrawals HallWithdrawal[]
+}
+
+model HallWithdrawal {
+  id               Int                  @id @default(autoincrement())
+  legacyId         Int?                 @unique
+  reservationId    Int
+  reservation      BanquetReservation   @relation(fields: [reservationId], references: [id])
+  dateSlotId       Int?
+  dateSlot         BanquetDateSlot?     @relation(fields: [dateSlotId], references: [id])
+  tierIdApplied    Int?
+  tier             HallCancellationTier? @relation(fields: [tierIdApplied], references: [id])
+  withdrawalDate   DateTime             @default(now())
+  refundableAmount Decimal              @db.Decimal(10, 2)
+  refundPercentage Decimal
+  cancellationFee  Decimal              @db.Decimal(10, 2)
+  fullCharge       Decimal              @db.Decimal(10, 2)
+  userId           Int
+  reason           String?
+}

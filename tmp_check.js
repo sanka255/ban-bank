@@ -1,0 +1,22 @@
+﻿const prisma = require('./src/prisma');
+(async ()=>{
+  const fromStart = new Date('2026-12-05T00:00:00.000Z');
+  const toEnd = new Date('2026-12-05T23:59:59.999Z');
+  const billLines = await prisma.guestBillLine.findMany({ where: { insertDate: { gte: fromStart, lte: toEnd } }, select: { id: true, chargeWithTax: true } });
+  const withdrawals = await prisma.hallWithdrawal.findMany({ where: { withdrawalDate: { gte: fromStart, lte: toEnd } }, select: { id: true } });
+  const billIds = billLines.map(b=>b.id);
+  const withdrawalIds = withdrawals.map(w=>w.id);
+  const combinedWhereOr = [];
+  combinedWhereOr.push({ postedAt: { gte: fromStart, lte: toEnd } });
+  if (billIds.length>0) combinedWhereOr.push({ sourceType: 'guest_bill_line', sourceId: { in: billIds } });
+  if (withdrawalIds.length>0) combinedWhereOr.push({ sourceType: 'hall_withdrawal', sourceId: { in: withdrawalIds } });
+  console.log('billIds', billIds);
+  console.log('withdrawalIds', withdrawalIds);
+  console.log('combinedWhereOr', JSON.stringify(combinedWhereOr));
+  const totals = await prisma.gLEntry.groupBy({ by: ['entryType'], where: { OR: combinedWhereOr }, _sum: { amount: true } });
+  console.log('groupBy totals', totals);
+  const entries = await prisma.gLEntry.findMany({ where: { OR: combinedWhereOr }, include: { account: true }, orderBy: [{ postedAt: 'desc' }, { id: 'desc' }] });
+  console.log('entries count', entries.length);
+  console.log(entries.slice(0,10));
+  process.exit(0);
+})();

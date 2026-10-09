@@ -1,0 +1,8 @@
+﻿Login admin
+Checking availability for Dec 2026
+Chosen free date 2026-12-02
+
+E2E error Error: Create menu failed: {"error":"Failed to create menu"}
+    at D:\banquest\Back\e2e_sprint6.js:36:39
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+
