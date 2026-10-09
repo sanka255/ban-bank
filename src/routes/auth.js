@@ -5,9 +5,9 @@ const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admi123';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '123';
 const CASHIER_USERNAME = process.env.CASHIER_USERNAME || 'cashier';
-const CASHIER_PASSWORD = process.env.CASHIER_PASSWORD || 'cashier123';
+const CASHIER_PASSWORD = process.env.CASHIER_PASSWORD || '123';
 
 router.post('/login', (req, res) => {
   const { username, password } = req.body || {};
