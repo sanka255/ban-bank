@@ -80,11 +80,17 @@ router.put('/:id', requireAdmin, async (req, res) => {
 // ── DELETE /api/banquet/menu-items/:id  [admin] ───────────────────────────────
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await prisma.menuItem.delete({ where: { id: Number(req.params.id) } });
+    const itemId = Number(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.menuToItem.deleteMany({ where: { itemId } });
+      await tx.packageItem.deleteMany({ where: { itemId } });
+      await tx.menuItem.delete({ where: { id: itemId } });
+    });
     res.json({ message: 'Item deleted' });
   } catch (e) {
     if (e.code === 'P2025') return res.status(404).json({ error: 'Item not found' });
-    console.error(e); res.status(500).json({ error: 'Failed to delete item' });
+    console.error(e);
+    res.status(500).json({ error: 'Failed to delete item' });
   }
 });
 

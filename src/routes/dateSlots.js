@@ -147,4 +147,138 @@ router.post('/:id/postpone', async (req, res) => {
   }
 });
 
+// ─── POST /api/banquet/date-slots/:id/change-hall ─────────────────────────────
+// Reassigns slot to a new hall partition with availability verification & audit log
+router.post('/:id/change-hall', async (req, res) => {
+  try {
+    const slotId = Number(req.params.id);
+    const { newPartitionId, reason } = req.body;
+
+    if (!newPartitionId) {
+      return res.status(400).json({ error: 'newPartitionId is required' });
+    }
+
+    const existing = await prisma.banquetDateSlot.findUnique({
+      where: { id: slotId },
+      include: { partition: true, reservation: true },
+    });
+    if (!existing) return res.status(404).json({ error: 'Date slot not found' });
+    if (existing.status === 'cancelled') return res.status(409).json({ error: 'Cannot change hall for a cancelled slot' });
+
+    const targetPartitionId = Number(newPartitionId);
+    if (targetPartitionId === existing.partitionId) {
+      return res.status(400).json({ error: 'Target partition is the same as current partition' });
+    }
+
+    // Verify availability on target partition
+    const avail = await checkPartitionAvailability({
+      partitionId: targetPartitionId,
+      fromDate: existing.fromDate.toISOString().slice(0, 10),
+      toDate: existing.toDate.toISOString().slice(0, 10),
+      fromTime: existing.fromTime.toISOString().slice(11, 16),
+      toTime: existing.toTime.toISOString().slice(11, 16),
+      forStatus: existing.reservation.status,
+    });
+
+    if (existing.reservation.status === 'guaranteed' && avail.hasGuaranteedConflict) {
+      return res.status(409).json({
+        error: 'Target partition has a conflicting guaranteed reservation for this time slot',
+        conflicts: avail.guaranteedConflicts,
+      });
+    }
+
+    const [log, updatedSlot] = await prisma.$transaction([
+      prisma.hallChangeLog.create({
+        data: {
+          reservationId: existing.reservationId,
+          dateSlotId: slotId,
+          oldPartitionId: existing.partitionId,
+          newPartitionId: targetPartitionId,
+          reason: reason?.trim() || null,
+          changedBy: req.user?.id || 1,
+        },
+        include: { oldPartition: true, newPartition: true },
+      }),
+      prisma.banquetDateSlot.update({
+        where: { id: slotId },
+        data: { partitionId: targetPartitionId },
+        include: { partition: { include: { hall: true } } },
+      }),
+    ]);
+
+    res.json({
+      message: 'Hall partition changed successfully',
+      slot: updatedSlot,
+      log,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to change hall partition' });
+  }
+});
+
+// ─── POST /api/banquet/date-slots/:id/requested-packages ─────────────────────
+router.post('/:id/requested-packages', async (req, res) => {
+  try {
+    const dateSlotId = Number(req.params.id);
+    const { packageId, guestCount, isComplementary = false, reason } = req.body;
+
+    if (!packageId || guestCount == null) {
+      return res.status(400).json({ error: 'packageId and guestCount are required' });
+    }
+    if (isComplementary && !reason?.trim()) {
+      return res.status(400).json({ error: 'reason is required when isComplementary is true' });
+    }
+
+    const pkg = await prisma.eventPackage.findUnique({ where: { id: Number(packageId) } });
+    if (!pkg) return res.status(404).json({ error: 'Event package not found' });
+    if (!pkg.isActive) return res.status(409).json({ error: 'Event package is inactive' });
+
+    const count = Number(guestCount);
+    const unitPrice = Number(pkg.price);
+    const charge = isComplementary ? 0 : pkg.isPerHead ? Number((unitPrice * count).toFixed(2)) : unitPrice;
+
+    const reqPkg = await prisma.requestedPackage.create({
+      data: {
+        dateSlotId,
+        packageId: pkg.id,
+        guestCount: count,
+        unitPrice,
+        charge,
+        isComplementary: Boolean(isComplementary),
+        reason: isComplementary ? reason.trim() : null,
+      },
+      include: { package: { include: { items: true } } },
+    });
+
+    res.status(201).json(reqPkg);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to attach package to slot' });
+  }
+});
+
+// ─── DELETE /api/banquet/date-slots/:id/requested-packages/:rpId ─────────────
+router.delete('/:id/requested-packages/:rpId', async (req, res) => {
+  try {
+    const dateSlotId = Number(req.params.id);
+    const rpId = Number(req.params.rpId);
+
+    // Billed integrity guard (C5)
+    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
+    if (billedCount > 0) {
+      return res.status(409).json({
+        error: 'Cannot delete package: a bill has already been generated for this date slot. Void or regenerate the bill first.',
+      });
+    }
+
+    await prisma.requestedPackage.delete({ where: { id: rpId } });
+    res.json({ message: 'Package removed from date slot' });
+  } catch (err) {
+    if (err.code === 'P2025') return res.status(404).json({ error: 'Requested package not found' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to remove package from slot' });
+  }
+});
+
 module.exports = router;

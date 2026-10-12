@@ -8,7 +8,7 @@ const router = express.Router();
 router.get('/', async (req, res) => {
   try {
     const cats = await prisma.menuCategory.findMany({
-      include: { items: { where: { isActive: true }, orderBy: { name: 'asc' } } },
+      include: { items: { orderBy: { name: 'asc' } } },
       orderBy: { name: 'asc' },
     });
     res.json(cats);
@@ -55,11 +55,30 @@ router.put('/:id', requireAdmin, async (req, res) => {
 // ── DELETE /api/banquet/menu-categories/:id  [admin] ─────────────────────────
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await prisma.menuCategory.delete({ where: { id: Number(req.params.id) } });
-    res.json({ message: 'Category deleted' });
+    const catId = Number(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      // Find all item IDs in this category
+      const items = await tx.menuItem.findMany({
+        where: { categoryId: catId },
+        select: { id: true },
+      });
+      const itemIds = items.map((i) => i.id);
+
+      if (itemIds.length > 0) {
+        // Remove menu links and package links for these items
+        await tx.menuToItem.deleteMany({ where: { itemId: { in: itemIds } } });
+        await tx.packageItem.deleteMany({ where: { itemId: { in: itemIds } } });
+        // Remove the items
+        await tx.menuItem.deleteMany({ where: { id: { in: itemIds } } });
+      }
+
+      await tx.menuCategory.delete({ where: { id: catId } });
+    });
+    res.json({ message: 'Category and its items deleted' });
   } catch (e) {
     if (e.code === 'P2025') return res.status(404).json({ error: 'Category not found' });
-    console.error(e); res.status(500).json({ error: 'Failed to delete category' });
+    console.error(e);
+    res.status(500).json({ error: 'Failed to delete category' });
   }
 });
 

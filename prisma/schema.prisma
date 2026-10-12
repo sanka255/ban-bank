@@ -76,6 +76,8 @@ model HallPartition {
   accountNo String?
   rates     HallRate[]
   dateSlots BanquetDateSlot[]
+  oldChanges HallChangeLog[] @relation("OldPartition")
+  newChanges HallChangeLog[] @relation("NewPartition")
 }
 
 model PaxRange {
@@ -204,11 +206,18 @@ model BanquetReservation {
   invoiceNo           String?
   createdBy           Int
   createdAt           DateTime                 @default(now())
+  checkedInAt         DateTime?
+  checkedInBy         Int?
+  checkedOutAt        DateTime?
+  checkedOutBy        Int?
   dateSlots           BanquetDateSlot[]
   deposits            HallDeposit[]
   withdrawals         HallWithdrawal[]
   guestBillLines      GuestBillLine[]
   paymentTransactions PaymentTransaction[]
+  hallChangeLogs      HallChangeLog[]
+  discounts           ReservationDiscount[]
+  beo                 BanquetEventOrder?
 }
 
 model BanquetDateSlot {
@@ -228,6 +237,9 @@ model BanquetDateSlot {
   requestedMenuItems RequestedMenuItem[]
   guestBillLines     GuestBillLine[]
   withdrawals        HallWithdrawal[]
+  hallChangeLogs     HallChangeLog[]
+  extraCharges       ExtraCharge[]
+  requestedPackages  RequestedPackage[]
 }
 
 model MenuCategory {
@@ -246,6 +258,7 @@ model MenuItem {
   isActive       Boolean         @default(true)
   menuLinks      MenuToItem[]
   requestedItems RequestedItem[]
+  packageItems   PackageItem[]
 }
 
 model Menu {
@@ -256,6 +269,7 @@ model Menu {
   items          MenuToItem[]
   rates          MenuRate[]
   requestedMenus RequestedMenuItem[]
+  packageItems   PackageItem[]
 }
 
 model MenuToItem {
@@ -308,6 +322,9 @@ model RequestedMenuItem {
   menuId          Int
   menu            Menu            @relation(fields: [menuId], references: [id])
   guestCount      Int
+  guestCountAdult Int             @default(0)
+  guestCountChild Int             @default(0)
+  childRate       Decimal?        @db.Decimal(10, 2)
   charge          Decimal         @db.Decimal(10, 2)
   isComplementary Boolean         @default(false)
   reason          String?
@@ -410,4 +427,99 @@ model HallWithdrawal {
   fullCharge       Decimal              @db.Decimal(10, 2)
   userId           Int
   reason           String?
+}
+
+model HallChangeLog {
+  id             Int                @id @default(autoincrement())
+  reservationId  Int
+  reservation    BanquetReservation @relation(fields: [reservationId], references: [id])
+  dateSlotId     Int
+  dateSlot       BanquetDateSlot    @relation(fields: [dateSlotId], references: [id])
+  oldPartitionId Int
+  newPartitionId Int
+  oldPartition   HallPartition      @relation("OldPartition", fields: [oldPartitionId], references: [id])
+  newPartition   HallPartition      @relation("NewPartition", fields: [newPartitionId], references: [id])
+  reason         String?
+  changedBy      Int
+  changedAt      DateTime           @default(now())
+}
+
+model ExtraCharge {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  category        String          // 'AV', 'Lighting', 'Corkage', 'Decorations', 'DanceFloor', 'Other'
+  description     String
+  quantity        Decimal         @db.Decimal(10, 2)
+  unitPrice       Decimal         @db.Decimal(10, 2)
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
+  createdAt       DateTime        @default(now())
+}
+
+model ReservationDiscount {
+  id            Int                @id @default(autoincrement())
+  reservationId Int
+  reservation   BanquetReservation @relation(fields: [reservationId], references: [id])
+  discountType  String             // 'percentage' or 'fixed'
+  value         Decimal            @db.Decimal(10, 2)
+  amount        Decimal            @db.Decimal(10, 2)
+  category      String             // 'overall', 'hall', 'menu'
+  reason        String
+  authorizedBy  Int
+  createdAt     DateTime           @default(now())
+}
+
+model BanquetEventOrder {
+  id                  Int                @id @default(autoincrement())
+  reservationId       Int                @unique
+  reservation         BanquetReservation @relation(fields: [reservationId], references: [id])
+  operationsNotes     String?            @db.Text
+  kitchenNotes        String?            @db.Text
+  housekeepingNotes   String?            @db.Text
+  frontOfficeNotes    String?            @db.Text
+  engineeringNotes    String?            @db.Text
+  chiefStewardNotes   String?            @db.Text
+  securityNotes       String?            @db.Text
+  specialInstructions String?            @db.Text
+  roomSetupDetails    String?            @db.Text
+  updatedBy           Int
+  updatedAt           DateTime           @updatedAt
+}
+
+model EventPackage {
+  id                Int                @id @default(autoincrement())
+  name              String
+  description       String?
+  price             Decimal            @db.Decimal(10, 2)
+  isPerHead         Boolean            @default(true)
+  isActive          Boolean            @default(true)
+  items             PackageItem[]
+  requestedPackages RequestedPackage[]
+}
+
+model PackageItem {
+  id         Int          @id @default(autoincrement())
+  packageId  Int
+  package    EventPackage @relation(fields: [packageId], references: [id])
+  itemId     Int?
+  item       MenuItem?    @relation(fields: [itemId], references: [id])
+  menuId     Int?
+  menu       Menu?        @relation(fields: [menuId], references: [id])
+  customName String?
+  quantity   Int          @default(1)
+}
+
+model RequestedPackage {
+  id              Int             @id @default(autoincrement())
+  dateSlotId      Int
+  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
+  packageId       Int
+  package         EventPackage    @relation(fields: [packageId], references: [id])
+  guestCount      Int
+  unitPrice       Decimal         @db.Decimal(10, 2)
+  charge          Decimal         @db.Decimal(10, 2)
+  isComplementary Boolean         @default(false)
+  reason          String?
 }

@@ -46,6 +46,7 @@ async function checkPartitionAvailability({
   fromTime,
   toTime,
   excludeDateSlotId = null,
+  forStatus = 'tentative', // 'tentative' or 'guaranteed'
 }) {
   // Normalise dates to Date objects (midnight UTC) so Prisma date comparisons work
   const fromDateObj = fromDate instanceof Date ? fromDate : new Date(`${fromDate}T00:00:00.000Z`);
@@ -63,7 +64,7 @@ async function checkPartitionAvailability({
     },
     include: {
       reservation: {
-        select: { reservationCode: true, status: true },
+        select: { id: true, reservationCode: true, status: true },
       },
     },
   });
@@ -79,9 +80,26 @@ async function checkPartitionAvailability({
     return reqFromMin < slotToMin && reqToMin > slotFromMin;
   });
 
+  // Split into guaranteed conflicts and tentative conflicts
+  const guaranteedStatuses = ['guaranteed', 'in_progress', 'completed'];
+  const guaranteedConflicts = conflicts.filter((c) =>
+    guaranteedStatuses.includes(c.reservation?.status)
+  );
+  const tentativeConflicts = conflicts.filter(
+    (c) => c.reservation?.status === 'tentative'
+  );
+
+  // If booking as tentative: only blocked if another GUARANTEED reservation exists.
+  // If booking as guaranteed: blocked if ANY guaranteed reservation exists.
+  const isAvailable = guaranteedConflicts.length === 0;
+
   return {
-    available: conflicts.length === 0,
-    conflicts,
+    available: isAvailable,
+    hasGuaranteedConflict: guaranteedConflicts.length > 0,
+    hasTentativeConflict: tentativeConflicts.length > 0,
+    guaranteedConflicts,
+    tentativeConflicts,
+    conflicts, // all conflicts (backwards-compatible)
   };
 }
 

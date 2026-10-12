@@ -2,6 +2,8 @@ const express = require('express');
 const prisma  = require('../prisma');
 const { calculateTax }      = require('../services/taxService');
 const { postBillLinesToRoom, verifyPmsReservation } = require('../services/pmsPostingService');
+const { snapshotCurrencyAmount } = require('../services/exchangeRateService');
+const { checkPartitionAvailability } = require('../services/availabilityService');
 
 const router = express.Router();
 
@@ -301,41 +303,165 @@ router.post('/deposits', async (req, res) => {
       return res.status(400).json({ error: 'reservationId, amount, and paymentMethod are required' });
     }
 
+    const reservation = await prisma.banquetReservation.findUnique({
+      where: { id: Number(reservationId) },
+      include: {
+        dateSlots: {
+          where: { status: 'active' },
+          include: { partition: true },
+        },
+      },
+    });
+    if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
+    if (reservation.status === 'cancelled') {
+      return res.status(409).json({ error: 'Cannot record deposit for a cancelled reservation' });
+    }
+
+    // Check if promoting tentative reservation to guaranteed is permitted
+    let canPromote = reservation.status === 'guaranteed';
+    let guaranteeWarning = null;
+
+    if (reservation.status === 'tentative') {
+      canPromote = true;
+      for (const slot of reservation.dateSlots) {
+        const avail = await checkPartitionAvailability({
+          partitionId: slot.partitionId,
+          fromDate: slot.fromDate,
+          toDate: slot.toDate,
+          fromTime: slot.fromTime,
+          toTime: slot.toTime,
+          excludeDateSlotId: slot.id,
+          forStatus: 'guaranteed',
+        });
+        if (avail.hasGuaranteedConflict) {
+          canPromote = false;
+          guaranteeWarning = `Has another guaranteed reservation on partition "${slot.partition?.name ?? slot.partitionId}". Reservation remains tentative.`;
+          break;
+        }
+      }
+    }
+
     const currencySnapshot = currencyId != null && Number(currencyId) !== 0
       ? await snapshotCurrencyAmount(amount, Number(currencyId), new Date())
       : { currencyId: null, baseCurrencyAmount: Number(amount), exchangeRateUsed: 1 };
 
-    const deposit = await prisma.hallDeposit.create({
-      data: {
-        reservationId: Number(reservationId),
-        amount:  Number(amount),
-        paymentMethod,
-        currencyId: currencySnapshot.currencyId,
-        baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
-        exchangeRateUsed: currencySnapshot.exchangeRateUsed,
-        receiptNo: receiptNo || null,
-        remark:    remark    || null,
-        settled:   false,
-      },
-      include: { reservation: { select: { reservationCode: true } } },
+    const deposit = await prisma.$transaction(async (tx) => {
+      const createdDeposit = await tx.hallDeposit.create({
+        data: {
+          reservationId: Number(reservationId),
+          amount:  Number(amount),
+          paymentMethod,
+          currencyId: currencySnapshot.currencyId,
+          baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
+          exchangeRateUsed: currencySnapshot.exchangeRateUsed,
+          receiptNo: receiptNo || null,
+          remark:    remark    || null,
+          settled:   false,
+        },
+        include: { reservation: { select: { reservationCode: true, status: true } } },
+      });
+
+      // If eligible, promote tentative reservation to guaranteed
+      if (canPromote && reservation.status === 'tentative') {
+        await tx.banquetReservation.update({
+          where: { id: reservation.id },
+          data: { status: 'guaranteed' },
+        });
+        createdDeposit.reservation.status = 'guaranteed';
+      }
+
+      return createdDeposit;
     });
-    res.status(201).json(deposit);
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Failed to create deposit' }); }
+
+    res.status(201).json({
+      ...deposit,
+      guaranteedPromoted: canPromote && reservation.status === 'tentative',
+      guaranteeWarning,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to create deposit' });
+  }
 });
 
 // ─── PUT /api/banquet/deposits/:id/settle ─────────────────────────────────────
 
 router.put('/deposits/:id/settle', async (req, res) => {
   try {
-    const deposit = await prisma.hallDeposit.update({
-      where:  { id: Number(req.params.id) },
-      data:   { settled: true },
-      include: { reservation: { select: { reservationCode: true } } },
+    const depositId = Number(req.params.id);
+    const existing = await prisma.hallDeposit.findUnique({
+      where: { id: depositId },
+      include: { reservation: true },
     });
+    if (!existing) return res.status(404).json({ error: 'Deposit not found' });
+
+    const deposit = await prisma.$transaction(async (tx) => {
+      const updated = await tx.hallDeposit.update({
+        where:  { id: depositId },
+        data:   { settled: true },
+        include: { reservation: { select: { reservationCode: true, status: true } } },
+      });
+
+      if (existing.reservation.status === 'tentative') {
+        await tx.banquetReservation.update({
+          where: { id: existing.reservationId },
+          data: { status: 'guaranteed' },
+        });
+        updated.reservation.status = 'guaranteed';
+      }
+
+      return updated;
+    });
+
     res.json(deposit);
   } catch (e) {
     if (e.code === 'P2025') return res.status(404).json({ error: 'Deposit not found' });
-    console.error(e); res.status(500).json({ error: 'Failed to settle deposit' });
+    console.error(e);
+    res.status(500).json({ error: 'Failed to settle deposit' });
+  }
+});
+
+// ─── DELETE /api/banquet/deposits/:id ──────────────────────────────────────────
+//
+// Deleting a deposit removes it. If the reservation has no remaining deposits,
+// its status automatically reverts from guaranteed to tentative (C2).
+
+router.delete('/deposits/:id', async (req, res) => {
+  try {
+    const depositId = Number(req.params.id);
+    const deposit = await prisma.hallDeposit.findUnique({
+      where: { id: depositId },
+      include: { reservation: true },
+    });
+    if (!deposit) return res.status(404).json({ error: 'Deposit not found' });
+
+    let revertedToTentative = false;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.hallDeposit.delete({ where: { id: depositId } });
+
+      const remainingDeposits = await tx.hallDeposit.count({
+        where: { reservationId: deposit.reservationId },
+      });
+
+      // If no deposits remain and was guaranteed, revert back to tentative
+      if (remainingDeposits === 0 && deposit.reservation.status === 'guaranteed') {
+        await tx.banquetReservation.update({
+          where: { id: deposit.reservationId },
+          data: { status: 'tentative' },
+        });
+        revertedToTentative = true;
+      }
+    });
+
+    res.json({
+      message: 'Deposit deleted successfully',
+      revertedToTentative,
+      reservationId: deposit.reservationId,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to delete deposit' });
   }
 });
 

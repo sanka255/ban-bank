@@ -49,7 +49,8 @@ function authenticateToken(req, res, next) {
  * Restricts the route to users with role === 'admin'.
  */
 function requireAdmin(req, res, next) {
-  if (!req.user || req.user.role !== 'admin') {
+  const role = req.user?.role?.toLowerCase();
+  if (!req.user || !['admin', 'manager', 'cashier'].includes(role)) {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();

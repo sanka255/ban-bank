@@ -120,6 +120,7 @@ router.post('/', async (req, res) => {
 
   // ── Availability check BEFORE transaction (prevent partial creation) ──────
   const conflictResults = [];
+  const tentativeWarnings = [];
   for (const slot of slotRequests) {
     const avail = await checkPartitionAvailability({
       partitionId: Number(slot.partitionId),
@@ -128,12 +129,17 @@ router.post('/', async (req, res) => {
       fromTime: slot.fromTime,
       toTime:   slot.toTime,
     });
-    if (!avail.available) conflictResults.push({ requestedSlot: slot, conflicts: avail.conflicts });
+    if (avail.hasGuaranteedConflict) {
+      conflictResults.push({ requestedSlot: slot, conflicts: avail.guaranteedConflicts });
+    } else if (avail.hasTentativeConflict) {
+      tentativeWarnings.push({ requestedSlot: slot, tentativeOverlaps: avail.tentativeConflicts });
+    }
   }
 
+  // Guaranteed conflicts block creation completely
   if (conflictResults.length > 0) {
     return res.status(409).json({
-      error: 'One or more date slots conflict with existing bookings — reservation not created',
+      error: 'One or more date slots conflict with guaranteed bookings — reservation not created',
       conflictingSlots: conflictResults,
     });
   }
@@ -186,7 +192,12 @@ router.post('/', async (req, res) => {
         createdSlots.push(slot);
       }
 
-      return { ...reservation, dateSlots: createdSlots, travelAgentWarning };
+      return {
+        ...reservation,
+        dateSlots: createdSlots,
+        travelAgentWarning,
+        tentativeWarnings: tentativeWarnings.length > 0 ? tentativeWarnings : undefined,
+      };
     });
 
     res.status(201).json(result);
@@ -289,6 +300,30 @@ router.put('/:id', async (req, res) => {
     const willBeComplementary = isComplementary != null ? Boolean(isComplementary) : existing.isComplementary;
     if (willBeComplementary && !(complementaryReason ?? existing.complementaryReason)?.trim()) {
       return res.status(400).json({ error: 'complementaryReason is required when isComplementary is true' });
+    }
+
+    if (status === 'guaranteed' && existing.status !== 'guaranteed') {
+      const slots = await prisma.banquetDateSlot.findMany({
+        where: { reservationId: existing.id, status: 'active' },
+        include: { partition: true },
+      });
+      for (const slot of slots) {
+        const avail = await checkPartitionAvailability({
+          partitionId: slot.partitionId,
+          fromDate: slot.fromDate,
+          toDate: slot.toDate,
+          fromTime: slot.fromTime,
+          toTime: slot.toTime,
+          excludeDateSlotId: slot.id,
+          forStatus: 'guaranteed',
+        });
+        if (avail.hasGuaranteedConflict) {
+          return res.status(409).json({
+            error: `Cannot promote to guaranteed: slot on partition "${slot.partition.name}" conflicts with another guaranteed reservation.`,
+            conflicts: avail.guaranteedConflicts,
+          });
+        }
+      }
     }
 
     const reservation = await prisma.banquetReservation.update({

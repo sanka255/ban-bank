@@ -12,7 +12,8 @@
     "db:push": "node_modules\\.bin\\prisma db push",
     "db:seed": "node scripts/seedDummyData.js",
     "migrate:legacy": "node scripts/sprint9/legacyMigration.js",
-    "migrate:legacy:dryrun": "node scripts/sprint9/legacyMigration.js --dry-run"
+    "migrate:legacy:dryrun": "node scripts/sprint9/legacyMigration.js --dry-run",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

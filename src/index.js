@@ -22,6 +22,10 @@ const menuRatePlansRouter     = require('./routes/menuRatePlans');
 const billingRouter           = require('./routes/billing');
 const currenciesRouter        = require('./routes/currencies');
 const exchangeRatesRouter     = require('./routes/exchangeRates');
+const extraChargesRouter      = require('./routes/extraCharges');
+const discountsRouter         = require('./routes/discounts');
+const packagesRouter          = require('./routes/packages');
+const beoRouter               = require('./routes/beo');
 
 const app  = express();
 const PORT = process.env.PORT || 4003;
@@ -65,6 +69,12 @@ app.use('/api/banquet',              billingRouter);  // GET /reservations/:id/f
 // Sprint 8 — multi-currency
 app.use('/api/banquet/currencies', currenciesRouter);
 app.use('/api/banquet/exchange-rates', exchangeRatesRouter);
+
+// Sprint 5, 6, 7 — Lifecycle, BEO, Extras, Discounts, Packages
+app.use('/api/banquet/date-slots/:id/extra-charges', extraChargesRouter);
+app.use('/api/banquet/reservations/:id/discounts',   discountsRouter);
+app.use('/api/banquet/packages',                     packagesRouter);
+app.use('/api/banquet/reservations/:id/beo',         beoRouter);
 
 // ─── Fallbacks ─────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));

@@ -74,6 +74,19 @@ async function postBillLinesToRoom(banquetReservationId, pmsReservationId, userI
   let posted = 0, skipped = 0;
   const postedIds = [];
 
+  // Query PMS night audit business date (C7)
+  let pmsAuditDate = null;
+  try {
+    const [auditRows] = await conn.query(
+      `SELECT audit_date FROM night_audit WHERE completed = 1 ORDER BY audit_date DESC LIMIT 1`
+    );
+    if (auditRows.length > 0 && auditRows[0].audit_date) {
+      pmsAuditDate = auditRows[0].audit_date;
+    }
+  } catch (auditErr) {
+    // night_audit not accessible or table empty; fall back to NOW()
+  }
+
   for (const line of lines) {
     const marker = `[BANQUET:${line.id}]`;
 
@@ -84,16 +97,17 @@ async function postBillLinesToRoom(banquetReservationId, pmsReservationId, userI
     );
     if (existing.length > 0) { skipped++; continue; }
 
-    // Insert guest_charge row
+    // Insert guest_charge row with PMS business date if available
     const [result] = await conn.query(
       `INSERT INTO guest_charges (reservation_id, charge_type_id, description, amount, posted_by, posted_at, is_void)
-       VALUES (?, ?, ?, ?, ?, NOW(), 0)`,
+       VALUES (?, ?, ?, ?, ?, COALESCE(?, NOW()), 0)`,
       [
         pmsReservationId,
         chargeTypeId,
         `${line.description} ${marker}`,
         Number(line.chargeWithTax),  // post the full charge including tax
         userId,
+        pmsAuditDate,
       ]
     );
     const guestChargeId = result.insertId;

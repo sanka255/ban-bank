@@ -16,16 +16,19 @@ const MENU_INCLUDE = {
 // ── GET /api/banquet/menus ────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    console.log('GET /api/banquet/menus called with query:', req.query);
     const { isActive } = req.query;
     const where = {};
     if (isActive !== undefined) where.isActive = isActive === 'true';
-    console.log('Finding menus with where=', JSON.stringify(where));
-    // Avoid complex include to prevent Prisma validation issues; return basic menu list and let clients fetch details separately
-    const menus = await prisma.menu.findMany({ where, orderBy: { name: 'asc' } });
-    console.log('Found menus count=', Array.isArray(menus) ? menus.length : 0);
+    const menus = await prisma.menu.findMany({
+      where,
+      include: MENU_INCLUDE,
+      orderBy: { name: 'asc' },
+    });
     res.json(menus);
-  } catch (e) { console.error('Error in GET /api/banquet/menus:', e && e.stack ? e.stack : e); res.status(500).json({ error: 'Failed to fetch menus', detail: e && e.message ? e.message : String(e) }); }
+  } catch (e) {
+    console.error('Error in GET /api/banquet/menus:', e && e.stack ? e.stack : e);
+    res.status(500).json({ error: 'Failed to fetch menus', detail: e && e.message ? e.message : String(e) });
+  }
 });
 
 // ── GET /api/banquet/menus/:id ────────────────────────────────────────────────
@@ -44,6 +47,7 @@ router.post('/', requireAdmin, async (req, res) => {
     if (!name?.trim()) return res.status(400).json({ error: 'name is required' });
     const menu = await prisma.menu.create({
       data: { name: name.trim(), accountId: accountId || null, isActive: isActive !== false },
+      include: MENU_INCLUDE,
     });
     res.status(201).json(menu);
   } catch (e) { console.error(e && e.stack ? e.stack : e); res.status(500).json({ error: 'Failed to create menu', detail: e && e.message ? e.message : String(e) }); }
@@ -72,11 +76,18 @@ router.put('/:id', requireAdmin, async (req, res) => {
 // ── DELETE /api/banquet/menus/:id  [admin] ───────────────────────────────────
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await prisma.menu.delete({ where: { id: Number(req.params.id) } });
+    const menuId = Number(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.menuToItem.deleteMany({ where: { menuId } });
+      await tx.menuRate.deleteMany({ where: { menuId } });
+      await tx.packageItem.deleteMany({ where: { menuId } });
+      await tx.menu.delete({ where: { id: menuId } });
+    });
     res.json({ message: 'Menu deleted' });
   } catch (e) {
     if (e.code === 'P2025') return res.status(404).json({ error: 'Menu not found' });
-    console.error(e); res.status(500).json({ error: 'Failed to delete menu' });
+    console.error(e);
+    res.status(500).json({ error: 'Failed to delete menu' });
   }
 });
 
@@ -95,10 +106,15 @@ router.post('/:menuId/items/:itemId', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Menu or item not found' });
     }
 
-    await prisma.menuToItem.upsert({
+    const existingLink = await prisma.menuToItem.findUnique({
       where: { menuId_itemId: { menuId, itemId } },
-      update: {},
-      create: { menuId, itemId },
+    });
+    if (existingLink) {
+      return res.status(409).json({ error: 'Item is already linked to this menu' });
+    }
+
+    await prisma.menuToItem.create({
+      data: { menuId, itemId },
     });
 
     const updatedMenu = await prisma.menu.findUnique({

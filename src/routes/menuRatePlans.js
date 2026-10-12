@@ -69,11 +69,16 @@ router.put('/:id', requireAdmin, async (req, res) => {
 // ── DELETE /api/banquet/menu-rate-plans/:id  [admin] ─────────────────────────
 router.delete('/:id', requireAdmin, async (req, res) => {
   try {
-    await prisma.menuRatePlan.delete({ where: { id: Number(req.params.id) } });
+    const planId = Number(req.params.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.menuRate.deleteMany({ where: { ratePlanId: planId } });
+      await tx.menuRatePlan.delete({ where: { id: planId } });
+    });
     res.json({ message: 'Rate plan deleted' });
   } catch (e) {
     if (e.code === 'P2025') return res.status(404).json({ error: 'Rate plan not found' });
-    console.error(e); res.status(500).json({ error: 'Failed to delete rate plan' });
+    console.error(e);
+    res.status(500).json({ error: 'Failed to delete rate plan' });
   }
 });
 

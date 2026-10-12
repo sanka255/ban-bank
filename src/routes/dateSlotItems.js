@@ -91,6 +91,14 @@ router.put('/:id/requested-items/:riId', async (req, res) => {
       return res.status(400).json({ error: 'reason is required when isComplementary is true' });
     }
 
+    const dateSlotId = Number(req.params.id);
+    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
+    if (billedCount > 0) {
+      return res.status(409).json({
+        error: 'Cannot modify requested items: a bill has already been generated for this date slot. Void or regenerate the bill first to maintain audit integrity.',
+      });
+    }
+
     const newQty   = quantity  != null ? Number(quantity)   : Number(existing.quantity);
     const newPrice = unitPrice != null ? Number(unitPrice)  : Number(existing.unitPrice);
     const charge   = Number((newQty * newPrice).toFixed(2));
@@ -116,6 +124,14 @@ router.put('/:id/requested-items/:riId', async (req, res) => {
  */
 router.delete('/:id/requested-items/:riId', async (req, res) => {
   try {
+    const dateSlotId = Number(req.params.id);
+    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
+    if (billedCount > 0) {
+      return res.status(409).json({
+        error: 'Cannot delete requested item: a bill has already been generated for this date slot. Void or regenerate the bill first to maintain audit integrity.',
+      });
+    }
+
     await prisma.requestedItem.delete({ where: { id: Number(req.params.riId) } });
     res.json({ message: 'Item removed from date slot' });
   } catch (e) {
@@ -188,6 +204,14 @@ router.post('/:id/requested-menus', async (req, res) => {
  */
 router.delete('/:id/requested-menus/:rmId', async (req, res) => {
   try {
+    const dateSlotId = Number(req.params.id);
+    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
+    if (billedCount > 0) {
+      return res.status(409).json({
+        error: 'Cannot delete requested menu: a bill has already been generated for this date slot. Void or regenerate the bill first to maintain audit integrity.',
+      });
+    }
+
     await prisma.requestedMenuItem.delete({ where: { id: Number(req.params.rmId) } });
     res.json({ message: 'Menu removed from date slot' });
   } catch (e) {
