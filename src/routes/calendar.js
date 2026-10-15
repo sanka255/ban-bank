@@ -39,7 +39,7 @@ router.get('/', async (req, res) => {
     // Load slots in date range (date-overlap: slot.fromDate ≤ toDate AND slot.toDate ≥ fromDate)
     const slots = await prisma.banquetDateSlot.findMany({
       where: {
-        status: { not: 'cancelled' },
+        status: { in: ['active', 'postponed'] },
         fromDate: { lte: toDateObj },
         toDate:   { gte: fromDateObj },
         ...(hallId
@@ -50,7 +50,14 @@ router.get('/', async (req, res) => {
         reservation: {
           include: { guest: { select: { firstName: true, lastName: true } } },
         },
-        partition: { select: { id: true, name: true, hallId: true } },
+        partition: {
+          select: {
+            id: true,
+            name: true,
+            hallId: true,
+            hall: { select: { id: true, name: true } },
+          },
+        },
       },
       orderBy: { fromDate: 'asc' },
     });
@@ -74,7 +81,7 @@ router.get('/', async (req, res) => {
           id: s.id,
           reservationId: s.reservationId,
           reservationCode: s.reservation.reservationCode,
-          reservationStatus: s.reservation.status,
+          reservationStatus: s.status === 'postponed' ? 'postponed' : s.reservation.status,
           guestName: `${s.reservation.guest.firstName} ${s.reservation.guest.lastName ?? ''}`.trim(),
           numberOfGuests: s.reservation.numberOfGuests,
           fromDate: s.fromDate.toISOString().slice(0, 10),
@@ -83,6 +90,10 @@ router.get('/', async (req, res) => {
           toTime:   s.toTime.toISOString().slice(11, 16),
           charge: s.charge,
           status: s.status,
+          partitionId: s.partitionId,
+          partitionName: s.partition.name,
+          hallId: s.partition.hallId,
+          hallName: s.partition.hall?.name ?? null,
         })),
       })),
     }));

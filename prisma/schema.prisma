@@ -36,6 +36,177 @@ enum GuestBillLineType {
   extra
 }
 
+enum ExtraChargeType {
+  hall
+  food
+  beverage
+  item
+  miscellaneous
+}
+
+enum ExtraChargeStatus {
+  active
+  voided
+}
+
+enum Permission {
+  // Dashboard
+  view_dashboard
+  // Reservations
+  view_reservations
+  create_reservation
+  edit_reservation
+  delete_reservation
+  cancel_reservation
+  postpone_reservation
+  // Date slots
+  view_date_slots
+  create_date_slot
+  edit_date_slot
+  delete_date_slot
+  change_hall
+  // Menus
+  view_menus
+  create_menu
+  edit_menu
+  delete_menu
+  attach_menu
+  remove_menu
+  // Menu rate plans
+  view_menu_rate_plans
+  create_menu_rate_plan
+  edit_menu_rate_plan
+  delete_menu_rate_plan
+  // Halls & partitions
+  view_halls
+  create_hall
+  edit_hall
+  delete_hall
+  create_partition
+  edit_partition
+  delete_partition
+  view_hall_rates
+  create_hall_rate
+  edit_hall_rate
+  delete_hall_rate
+  // Extra charges
+  view_extra_charges
+  create_extra_charge
+  edit_extra_charge
+  delete_extra_charge
+  void_extra_charge
+  // Billing & payments
+  view_folio
+  generate_bill
+  regenerate_bill
+  post_to_room
+  record_deposit
+  settle_deposit
+  delete_deposit
+  initiate_payment
+  view_payments
+  refund_payment
+  // Packages
+  view_packages
+  create_package
+  edit_package
+  delete_package
+  attach_package
+  // Discounts
+  view_discounts
+  create_discount
+  edit_discount
+  delete_discount
+  // BEO
+  view_beo
+  edit_beo
+  // Reports
+  view_reports
+  // Admin
+  manage_users
+  manage_roles
+  manage_currencies
+  manage_exchange_rates
+  manage_function_accounts
+  manage_pax_ranges
+  manage_cancellation_tiers
+  manage_travel_agents
+  manage_chart_of_accounts
+  manage_gl_entries
+}
+
+enum UserRole {
+  admin
+  manager
+  supervisor
+  front_office
+  cashier
+  banquet_host
+  sales
+}
+
+model User {
+  id            Int            @id @default(autoincrement())
+  username      String         @unique
+  passwordHash  String
+  fullName      String?
+  email         String?
+  phone         String?
+  isActive      Boolean        @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  roles         Role[]
+  permissions   UserPermission[]
+  auditLogs     UserAuditLog[]
+}
+
+model Role {
+  id          Int          @id @default(autoincrement())
+  name        String       @unique
+  description String?
+  permissions RolePermission[]
+  users       User[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model RolePermission {
+  id         Int        @id @default(autoincrement())
+  role       Role       @relation(fields: [roleId], references: [id])
+  roleId     Int
+  permission Permission
+  createdAt  DateTime   @default(now())
+
+  @@unique([roleId, permission])
+}
+
+model UserPermission {
+  id         Int        @id @default(autoincrement())
+  user       User       @relation(fields: [userId], references: [id])
+  userId     Int
+  permission Permission
+  grantedBy  Int?
+  grantedAt  DateTime   @default(now())
+
+  @@unique([userId, permission])
+}
+
+model UserAuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  action    String
+  resource  String?
+  details   String?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
 enum PaymentStatus {
   pending
   captured
@@ -216,7 +387,9 @@ model BanquetReservation {
   guestBillLines      GuestBillLine[]
   paymentTransactions PaymentTransaction[]
   hallChangeLogs      HallChangeLog[]
+  extraCharges        ExtraCharge[]
   discounts           ReservationDiscount[]
+  auditLogs           ReservationAuditLog[]
   beo                 BanquetEventOrder?
 }
 
@@ -444,18 +617,53 @@ model HallChangeLog {
   changedAt      DateTime           @default(now())
 }
 
+model ExtraChargeItem {
+  id                   Int             @id @default(autoincrement())
+  code                 String          @unique
+  name                 String
+  chargeType           ExtraChargeType
+  unitLabel            String          @default("each")
+  defaultPrice         Decimal         @db.Decimal(10, 2)
+  taxClassId           Int?
+  accountId            Int?
+  allowPriceOverride   Boolean         @default(false)
+  allowComplementary   Boolean         @default(false)
+  isQuickPick          Boolean         @default(false)
+  sortOrder            Int             @default(0)
+  isActive             Boolean         @default(true)
+  createdBy            Int
+  updatedBy            Int?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+}
+
 model ExtraCharge {
-  id              Int             @id @default(autoincrement())
-  dateSlotId      Int
-  dateSlot        BanquetDateSlot @relation(fields: [dateSlotId], references: [id])
-  category        String          // 'AV', 'Lighting', 'Corkage', 'Decorations', 'DanceFloor', 'Other'
+  id              Int               @id @default(autoincrement())
+  reservationId   Int
+  reservation     BanquetReservation @relation(fields: [reservationId], references: [id])
+  dateSlotId      Int?
+  dateSlot        BanquetDateSlot?  @relation(fields: [dateSlotId], references: [id])
+  catalogueItemId Int?
+  category        String?
+  chargeType      ExtraChargeType
   description     String
-  quantity        Decimal         @db.Decimal(10, 2)
-  unitPrice       Decimal         @db.Decimal(10, 2)
-  charge          Decimal         @db.Decimal(10, 2)
-  isComplementary Boolean         @default(false)
+  quantity        Decimal           @db.Decimal(10, 2)
+  unitPrice       Decimal           @db.Decimal(10, 2)
+  charge          Decimal           @db.Decimal(15, 2)
+  taxAmount       Decimal           @db.Decimal(15, 2) @default(0)
+  chargeWithTax   Decimal           @db.Decimal(15, 2) @default(0)
   reason          String?
-  createdAt       DateTime        @default(now())
+  explanation     String?
+  isComplementary Boolean           @default(false)
+  status          ExtraChargeStatus @default(active)
+  voidReason      String?
+  voidedBy        Int?
+  voidedAt        DateTime?
+  billLineId      Int?
+  createdBy       Int
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  idempotencyKey  String?           @unique
 }
 
 model ReservationDiscount {
@@ -469,6 +677,20 @@ model ReservationDiscount {
   reason        String
   authorizedBy  Int
   createdAt     DateTime           @default(now())
+}
+
+model ReservationAuditLog {
+  id              Int                  @id @default(autoincrement())
+  reservationId   Int
+  reservation     BanquetReservation   @relation(fields: [reservationId], references: [id])
+  actorId         Int?
+  action          String
+  oldStatus       BanquetReservationStatus?
+  newStatus       BanquetReservationStatus?
+  paymentCategory String?
+  amount          Decimal?             @db.Decimal(15, 2)
+  note            String?
+  createdAt       DateTime             @default(now())
 }
 
 model BanquetEventOrder {

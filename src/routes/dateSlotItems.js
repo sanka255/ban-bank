@@ -1,5 +1,7 @@
 const express = require('express');
 const prisma = require('../prisma');
+const { requireAdminOrFrontOffice } = require('../middleware/auth');
+const { resolveMenuRateForDate, checkMenuAlreadyAttached } = require('../services/menuSelectionService');
 
 const router = express.Router({ mergeParams: true });
 
@@ -148,7 +150,7 @@ router.delete('/:id/requested-items/:riId', async (req, res) => {
  * Finds the active MenuRate for the menu on the slot's event date.
  * Rejects with 422 if no rate plan covers that date — never silently uses 0.
  */
-router.post('/:id/requested-menus', async (req, res) => {
+router.post('/:id/requested-menus', requireAdminOrFrontOffice, async (req, res) => {
   try {
     const dateSlotId = Number(req.params.id);
     const { menuItemId, menuId, guestCount, isComplementary = false, reason } = req.body;
@@ -161,20 +163,43 @@ router.post('/:id/requested-menus', async (req, res) => {
       return res.status(400).json({ error: 'reason is required when isComplementary is true' });
     }
 
-    const slot = await prisma.banquetDateSlot.findUnique({ where: { id: dateSlotId } });
+    const slot = await prisma.banquetDateSlot.findUnique({
+      where: { id: dateSlotId },
+      include: { reservation: true, requestedMenuItems: true },
+    });
     if (!slot) return res.status(404).json({ error: 'Date slot not found' });
+    if (slot.reservation.status === 'cancelled' || slot.reservation.status === 'completed') {
+      return res.status(409).json({ error: 'This reservation is closed and cannot accept menu changes.' });
+    }
+
+    if (checkMenuAlreadyAttached({ existingMenuItems: slot.requestedMenuItems, menuId: resolvedMenuId })) {
+      return res.status(409).json({ error: 'This menu is already attached to this slot. Update the guest count instead.' });
+    }
 
     const menu = await prisma.menu.findUnique({ where: { id: resolvedMenuId } });
     if (!menu) return res.status(404).json({ error: 'Menu not found' });
     if (menu.isActive === false) return res.status(409).json({ error: 'Menu is inactive' });
 
     const eventDate = slot.fromDate.toISOString().slice(0, 10);
-    const rate = await findMenuRate(menu.id, eventDate);
+    const rate = await resolveMenuRateForDate({
+      menuId: menu.id,
+      eventDate,
+      findRate: async ({ menuId, eventDate }) => prisma.menuRate.findFirst({
+        where: {
+          menuId,
+          ratePlan: {
+            isActive: true,
+            fromDate: { lte: new Date(`${eventDate}T00:00:00.000Z`) },
+            toDate: { gte: new Date(`${eventDate}T00:00:00.000Z`) },
+          },
+        },
+        include: { ratePlan: true },
+      }),
+    });
 
     if (!rate) {
       return res.status(422).json({
-        error: `No active rate plan covers the event date ${eventDate} for menu "${menu.name}". ` +
-               `Configure a rate plan that covers this date before attaching the menu.`,
+        error: `No active rate plan covers the event date ${eventDate} for menu "${menu.name}". Configure a rate plan that covers this date before attaching the menu.`,
         eventDate,
         menuId: menu.id,
         menuName: menu.name,
@@ -202,7 +227,56 @@ router.post('/:id/requested-menus', async (req, res) => {
 /**
  * DELETE /api/banquet/date-slots/:id/requested-menus/:rmId
  */
-router.delete('/:id/requested-menus/:rmId', async (req, res) => {
+router.put('/:id/requested-menus/:rmId', requireAdminOrFrontOffice, async (req, res) => {
+  try {
+    const { guestCount } = req.body;
+    if (guestCount == null) return res.status(400).json({ error: 'guestCount is required' });
+
+    const existing = await prisma.requestedMenuItem.findUnique({ where: { id: Number(req.params.rmId) }, include: { dateSlot: { include: { reservation: true } } } });
+    if (!existing) return res.status(404).json({ error: 'Requested menu not found' });
+    if (existing.dateSlot.reservation.status === 'cancelled' || existing.dateSlot.reservation.status === 'completed') {
+      return res.status(409).json({ error: 'This reservation is closed and cannot accept menu changes.' });
+    }
+
+    const eventDate = existing.dateSlot.fromDate.toISOString().slice(0, 10);
+    const rate = await resolveMenuRateForDate({
+      menuId: existing.menuId,
+      eventDate,
+      findRate: async ({ menuId, eventDate }) => prisma.menuRate.findFirst({
+        where: {
+          menuId,
+          ratePlan: {
+            isActive: true,
+            fromDate: { lte: new Date(`${eventDate}T00:00:00.000Z`) },
+            toDate: { gte: new Date(`${eventDate}T00:00:00.000Z`) },
+          },
+        },
+        include: { ratePlan: true },
+      }),
+    });
+
+    if (!rate) {
+      return res.status(422).json({ error: 'No active rate plan is available for this menu on the event date.' });
+    }
+
+    const nextCount = Number(guestCount);
+    const updated = await prisma.requestedMenuItem.update({
+      where: { id: Number(req.params.rmId) },
+      data: {
+        guestCount: nextCount,
+        charge: Number((Number(rate.charge) * nextCount).toFixed(2)),
+      },
+      include: { menu: true },
+    });
+
+    res.json({ ...updated, appliedRate: rate });
+  } catch (e) {
+    if (e.code === 'P2025') return res.status(404).json({ error: 'Requested menu not found' });
+    console.error(e); res.status(500).json({ error: 'Failed to update menu' });
+  }
+});
+
+router.delete('/:id/requested-menus/:rmId', requireAdminOrFrontOffice, async (req, res) => {
   try {
     const dateSlotId = Number(req.params.id);
     const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });

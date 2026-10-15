@@ -16,7 +16,7 @@ router.get('/', async (req, res) => {
         guest: true,
         functionAccount: true,
         dateSlots: {
-          where: { status: { not: 'cancelled' } },
+          where: { status: 'active' },
           include: {
             partition: { include: { hall: true } },
             requestedItems: { include: { item: { include: { category: true } } } },

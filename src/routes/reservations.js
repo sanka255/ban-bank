@@ -3,6 +3,10 @@ const prisma = require('../prisma');
 const { requireAdmin } = require('../middleware/auth');
 const { checkPartitionAvailability } = require('../services/availabilityService');
 const { cancelReservation } = require('../services/cancellationService');
+const {
+  buildReservationChargeSummary,
+  buildReservationPaymentSummary,
+} = require('../services/extraChargeService');
 const { getActivePmsReservation, ensureGuestChargeExists } = require('../services/pmsService');
 
 const router = express.Router();
@@ -229,7 +233,7 @@ router.get('/', async (req, res) => {
     if (fromDate || toDate) {
       where.dateSlots = {
         some: {
-          status: { not: 'cancelled' },
+          status: 'active',
           ...(fromDate ? { fromDate: { gte: new Date(`${fromDate}T00:00:00.000Z`) } } : {}),
           ...(toDate   ? { toDate:   { lte: new Date(`${toDate}T00:00:00.000Z`)   } } : {}),
         },
@@ -242,7 +246,7 @@ router.get('/', async (req, res) => {
         include: {
           guest: { select: { id: true, firstName: true, lastName: true, phone: true } },
           functionAccount: { select: { id: true, name: true } },
-          dateSlots: { where: { status: { not: 'cancelled' } }, orderBy: { fromDate: 'asc' } },
+          dateSlots: { where: { status: 'active' }, orderBy: { fromDate: 'asc' } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (Number(page) - 1) * Number(limit),
@@ -423,34 +427,83 @@ router.get('/:id/folio', async (req, res) => {
       where: { id: reservationId },
       include: {
         guest: true,
+        functionAccount: true,
         dateSlots: {
-          include: { partition: { include: { hall: true } } },
+          include: {
+            partition: { include: { hall: true } },
+            requestedItems: { include: { item: true } },
+            requestedMenuItems: { include: { menu: true } },
+            guestBillLines: { orderBy: { createdAt: 'asc' } },
+          },
           orderBy: { fromDate: 'asc' },
         },
         guestBillLines: { orderBy: { createdAt: 'asc' } },
+        extraCharges: { orderBy: { createdAt: 'asc' } },
         deposits: { orderBy: { insertDate: 'desc' } },
+        paymentTransactions: { orderBy: { createdAt: 'desc' } },
       },
     });
 
     if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
 
-    const baseCharges = reservation.guestBillLines.reduce((sum, line) => sum + Number(line.charge || 0), 0);
-    const taxAmount = reservation.guestBillLines.reduce((sum, line) => sum + Number(line.taxAmount || 0), 0);
-    const totalWithTax = reservation.guestBillLines.reduce((sum, line) => sum + Number(line.chargeWithTax || 0), 0);
-    const depositsTotal = reservation.deposits.reduce((sum, deposit) => sum + Number(deposit.amount || 0), 0);
-    const settledDeposits = reservation.deposits.filter((deposit) => deposit.settled).reduce((sum, deposit) => sum + Number(deposit.amount || 0), 0);
+    const reservationChargeSummary = buildReservationChargeSummary({
+      billLines: reservation.guestBillLines,
+      extraCharges: reservation.extraCharges,
+      dateSlots: reservation.dateSlots,
+    });
+
+    const reservationPaymentSummary = buildReservationPaymentSummary({
+      totalWithTax: reservationChargeSummary.totalWithTax,
+      deposits: reservation.deposits,
+      paymentTransactions: reservation.paymentTransactions,
+    });
+
+    const summary = {
+      totalBaseCharge: reservationChargeSummary.totalBaseCharge,
+      totalTax: reservationChargeSummary.totalTax,
+      totalWithTax: reservationChargeSummary.totalWithTax,
+      extraChargeTotal: reservationChargeSummary.extraChargeTotal,
+      pendingExtraChargeCount: reservationChargeSummary.pendingExtraChargeCount,
+      chargeBreakdown: reservationChargeSummary.chargeBreakdown,
+      totalDeposits: reservationPaymentSummary.totalDeposits,
+      settledDeposits: reservationPaymentSummary.settledDeposits,
+      capturedPayments: reservationPaymentSummary.capturedPayments,
+      pendingPaymentTotal: reservationPaymentSummary.pendingPaymentTotal,
+      pendingPaymentCount: reservationPaymentSummary.pendingPaymentCount,
+      totalReceived: reservationPaymentSummary.totalReceived,
+      outstandingBalance: reservationPaymentSummary.outstandingBalance,
+    };
 
     res.json({
-      reservation,
+      reservation: {
+        id: reservation.id,
+        reservationCode: reservation.reservationCode,
+        guest: reservation.guest,
+        functionAccount: reservation.functionAccount,
+        numberOfGuests: reservation.numberOfGuests,
+        status: reservation.status,
+        isComplementary: reservation.isComplementary,
+      },
+      dateSlots: reservation.dateSlots,
       billLines: reservation.guestBillLines,
+      extraCharges: reservation.extraCharges,
       deposits: reservation.deposits,
+      paymentTransactions: reservation.paymentTransactions,
+      summary,
       totals: {
-        baseCharges: Number(baseCharges.toFixed(2)),
-        taxAmount: Number(taxAmount.toFixed(2)),
-        totalWithTax: Number(totalWithTax.toFixed(2)),
-        depositsTotal: Number(depositsTotal.toFixed(2)),
-        settledDeposits: Number(settledDeposits.toFixed(2)),
-        outstandingBalance: Number((totalWithTax - settledDeposits).toFixed(2)),
+        baseCharges: summary.totalBaseCharge,
+        taxAmount: summary.totalTax,
+        totalWithTax: summary.totalWithTax,
+        extraChargeTotal: summary.extraChargeTotal,
+        pendingExtraChargeCount: summary.pendingExtraChargeCount,
+        chargeBreakdown: summary.chargeBreakdown,
+        depositsTotal: summary.totalDeposits,
+        settledDeposits: summary.settledDeposits,
+        capturedPayments: summary.capturedPayments,
+        pendingPaymentTotal: summary.pendingPaymentTotal,
+        pendingPaymentCount: summary.pendingPaymentCount,
+        totalReceived: summary.totalReceived,
+        outstandingBalance: summary.outstandingBalance,
       },
     });
   } catch (error) {

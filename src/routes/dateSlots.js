@@ -2,6 +2,7 @@ const express = require('express');
 const prisma = require('../prisma');
 const { checkPartitionAvailability } = require('../services/availabilityService');
 const { cancelDateSlot } = require('../services/cancellationService');
+const { buildSlotMenuSummary } = require('../services/menuSelectionService');
 
 const router = express.Router();
 
@@ -13,6 +14,55 @@ function parseDateSlotInput(slot) {
     toTime:   new Date(`1970-01-01T${slot.toTime}:00.000Z`),
   };
 }
+
+// ─── GET /api/banquet/date-slots/:id ────────────────────────────────────────
+router.get('/:id', async (req, res) => {
+  try {
+    const slotId = Number(req.params.id);
+    const slot = await prisma.banquetDateSlot.findUnique({
+      where: { id: slotId },
+      include: {
+        reservation: {
+          select: {
+            id: true,
+            reservationCode: true,
+            status: true,
+            numberOfGuests: true,
+            guest: { select: { firstName: true, lastName: true } },
+          },
+        },
+        partition: { include: { hall: true } },
+        requestedItems: { include: { item: { include: { category: true } } } },
+        requestedMenuItems: { include: { menu: true } },
+      },
+    });
+
+    if (!slot) return res.status(404).json({ error: 'Date slot not found' });
+
+    const subtotal = buildSlotMenuSummary({
+      slotCharge: slot.charge,
+      requestedMenuItems: slot.requestedMenuItems,
+      requestedItems: slot.requestedItems,
+    });
+
+    res.json({
+      slot: {
+        ...slot,
+        fromDate: slot.fromDate.toISOString().slice(0, 10),
+        toDate: slot.toDate.toISOString().slice(0, 10),
+        fromTime: slot.fromTime.toISOString().slice(11, 16),
+        toTime: slot.toTime.toISOString().slice(11, 16),
+      },
+      reservation: slot.reservation,
+      requestedMenus: slot.requestedMenuItems,
+      requestedItems: slot.requestedItems,
+      subtotal,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch date slot' });
+  }
+});
 
 // ─── PUT /api/banquet/date-slots/:id ─────────────────────────────────────────
 // Edit a slot's date/time in-place (minor adjustments; for full postponement use /postpone)
@@ -90,7 +140,7 @@ router.post('/:id/cancel', async (req, res) => {
 router.post('/:id/postpone', async (req, res) => {
   try {
     const slotId = Number(req.params.id);
-    const { fromDate, toDate, fromTime, toTime } = req.body;
+    const { fromDate, toDate, fromTime, toTime, partitionId } = req.body;
 
     if (!fromDate || !toDate || !fromTime || !toTime) {
       return res.status(400).json({ error: 'fromDate, toDate, fromTime, and toTime are required' });
@@ -105,9 +155,14 @@ router.post('/:id/postpone', async (req, res) => {
       return res.status(409).json({ error: `Cannot postpone a slot with status '${existing.status}'` });
     }
 
-    // Check availability for new window, excluding the current slot
+    const targetPartitionId = Number(partitionId ?? existing.partitionId);
+    if (targetPartitionId !== existing.partitionId) {
+      return res.status(400).json({ error: 'Postponement must use the currently selected hall/partition for this reservation.' });
+    }
+
+    // Check availability for the currently selected hall/partition before creating the new slot
     const avail = await checkPartitionAvailability({
-      partitionId: existing.partitionId,
+      partitionId: targetPartitionId,
       fromDate,
       toDate,
       fromTime,
@@ -127,7 +182,7 @@ router.post('/:id/postpone', async (req, res) => {
       prisma.banquetDateSlot.create({
         data: {
           reservationId: existing.reservationId,
-          partitionId:   existing.partitionId,
+          partitionId:   targetPartitionId,
           ...parseDateSlotInput({ fromDate, toDate, fromTime, toTime }),
           charge: existing.charge, // inherit charge; staff can edit separately
           status: 'active',

@@ -11,6 +11,7 @@ const {
   buildPayPalCaptureMock,
 } = require('../services/paymentGateway');
 const { snapshotCurrencyAmount } = require('../services/exchangeRateService');
+const { applyReservationPaymentCategory, normalizePaymentCategory } = require('../services/paymentGuaranteeService');
 
 const router = express.Router();
 
@@ -60,10 +61,11 @@ router.post('/payments/mock/webhook', async (req, res) => {
 
 router.post('/payments/paypal/create-order', async (req, res) => {
   try {
-    const { reservationId, amount, currencyCode, savedPaymentMethodId, currencyId } = req.body || {};
+    const { reservationId, amount, currencyCode, savedPaymentMethodId, currencyId, category } = req.body || {};
     const reservationIdNumber = Number(reservationId);
     const numericAmount = Number(amount);
     const requestedCurrencyId = currencyId != null ? Number(currencyId) : null;
+    const paymentCategory = normalizePaymentCategory(category || 'advance');
 
     if (!Number.isFinite(reservationIdNumber)) {
       return res.status(400).json({ error: 'Reservation ID is required.' });
@@ -85,19 +87,40 @@ router.post('/payments/paypal/create-order', async (req, res) => {
       referenceId: `reservation_${reservationIdNumber}`,
     });
 
-    const transaction = await prisma.paymentTransaction.create({
-      data: {
-        reservationId: reservationIdNumber,
-        gatewayProvider: 'paypal',
-        gatewayRef: order.id,
-        amount: numericAmount,
-        currencyId: currencySnapshot.currencyId,
-        baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
-        exchangeRateUsed: currencySnapshot.exchangeRateUsed,
-        currencyCode: currencyLabel,
-        status: 'pending',
-        webhookVerified: false,
-      },
+    const transaction = await prisma.$transaction(async (tx) => {
+      const created = await tx.paymentTransaction.create({
+        data: {
+          reservationId: reservationIdNumber,
+          gatewayProvider: 'paypal',
+          gatewayRef: order.id,
+          amount: numericAmount,
+          currencyId: currencySnapshot.currencyId,
+          baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
+          exchangeRateUsed: currencySnapshot.exchangeRateUsed,
+          currencyCode: currencyLabel,
+          status: 'pending',
+          webhookVerified: false,
+        },
+      });
+
+      const reservation = await tx.banquetReservation.findUnique({
+        where: { id: reservationIdNumber },
+        include: { dateSlots: { where: { status: 'active' } } },
+      });
+
+      if (reservation) {
+        await applyReservationPaymentCategory({
+          tx,
+          reservation,
+          category: paymentCategory,
+          amount: numericAmount,
+          userId: req.user?.id || 0,
+          paymentId: created.id,
+          note: `PayPal ${paymentCategory} payment initiated`,
+        });
+      }
+
+      return created;
     });
 
     return res.status(201).json({
@@ -115,6 +138,9 @@ router.post('/payments/paypal/create-order', async (req, res) => {
       message: 'PayPal sandbox order created successfully.',
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message, conflicts: error.conflicts || [] });
+    }
     console.error('PayPal order creation failed:', error);
     return res.status(500).json({ error: 'Failed to create PayPal sandbox order.' });
   }
@@ -174,6 +200,9 @@ router.post('/payments/paypal/capture', async (req, res) => {
       message: 'PayPal sandbox payment was captured successfully.',
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message, conflicts: error.conflicts || [] });
+    }
     console.error('PayPal capture failed:', error);
     return res.status(500).json({ error: 'Failed to capture PayPal sandbox payment.' });
   }
@@ -182,7 +211,7 @@ router.post('/payments/paypal/capture', async (req, res) => {
 router.post('/reservations/:reservationId/payments/initiate', async (req, res) => {
   try {
     const reservationId = Number(req.params.reservationId);
-    const { amount, currencyCode, savedPaymentMethodId, currencyId } = req.body || {};
+    const { amount, currencyCode, savedPaymentMethodId, currencyId, category } = req.body || {};
 
     if (!Number.isFinite(reservationId)) {
       return res.status(400).json({ error: 'Reservation ID is required.' });
@@ -220,6 +249,7 @@ router.post('/reservations/:reservationId/payments/initiate', async (req, res) =
     const provider = getGatewayProvider();
     const currency = normalizeCurrencyCode(currencyCode);
     const resolvedCurrencyId = currencyId != null ? Number(currencyId) : null;
+    const paymentCategory = normalizePaymentCategory(category || 'advance');
     const currencySnapshot = resolvedCurrencyId
       ? await snapshotCurrencyAmount(numericAmount, resolvedCurrencyId, new Date())
       : { currencyId: null, baseCurrencyAmount: numericAmount, exchangeRateUsed: 1 };
@@ -231,19 +261,33 @@ router.post('/reservations/:reservationId/payments/initiate', async (req, res) =
         reservationId: reservation.id,
       });
 
-      const transaction = await prisma.paymentTransaction.create({
-        data: {
-          reservationId: reservation.id,
-          gatewayProvider: provider,
-          gatewayRef: mockOrder.id,
+      const transaction = await prisma.$transaction(async (tx) => {
+        const created = await tx.paymentTransaction.create({
+          data: {
+            reservationId: reservation.id,
+            gatewayProvider: provider,
+            gatewayRef: mockOrder.id,
+            amount: numericAmount,
+            currencyId: currencySnapshot.currencyId,
+            baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
+            exchangeRateUsed: currencySnapshot.exchangeRateUsed,
+            currencyCode: currency,
+            status: 'pending',
+            webhookVerified: false,
+          },
+        });
+
+        await applyReservationPaymentCategory({
+          tx,
+          reservation,
+          category: paymentCategory,
           amount: numericAmount,
-          currencyId: currencySnapshot.currencyId,
-          baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
-          exchangeRateUsed: currencySnapshot.exchangeRateUsed,
-          currencyCode: currency,
-          status: 'pending',
-          webhookVerified: false,
-        },
+          userId: req.user?.id || 0,
+          paymentId: created.id,
+          note: `PayPal ${paymentCategory} payment initiated`,
+        });
+
+        return created;
       });
 
       return res.status(201).json({
@@ -261,19 +305,33 @@ router.post('/reservations/:reservationId/payments/initiate', async (req, res) =
       });
     }
 
-    const transaction = await prisma.paymentTransaction.create({
-      data: {
-        reservationId: reservation.id,
-        gatewayProvider: provider,
-        gatewayRef: buildGatewayReference('pay'),
+    const transaction = await prisma.$transaction(async (tx) => {
+      const created = await tx.paymentTransaction.create({
+        data: {
+          reservationId: reservation.id,
+          gatewayProvider: provider,
+          gatewayRef: buildGatewayReference('pay'),
+          amount: numericAmount,
+          currencyId: currencySnapshot.currencyId,
+          baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
+          exchangeRateUsed: currencySnapshot.exchangeRateUsed,
+          currencyCode: currency,
+          status: 'pending',
+          webhookVerified: false,
+        },
+      });
+
+      await applyReservationPaymentCategory({
+        tx,
+        reservation,
+        category: paymentCategory,
         amount: numericAmount,
-        currencyId: currencySnapshot.currencyId,
-        baseCurrencyAmount: currencySnapshot.baseCurrencyAmount,
-        exchangeRateUsed: currencySnapshot.exchangeRateUsed,
-        currencyCode: currency,
-        status: 'pending',
-        webhookVerified: false,
-      },
+        userId: req.user?.id || 0,
+        paymentId: created.id,
+        note: `${paymentCategory} payment initiated`,
+      });
+
+      return created;
     });
 
     return res.status(201).json({
@@ -288,6 +346,9 @@ router.post('/reservations/:reservationId/payments/initiate', async (req, res) =
       message: 'Payment initiation received. Capture is completed only after the gateway webhook confirms success.',
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message, conflicts: error.conflicts || [] });
+    }
     console.error('Payment initiation failed:', error);
     return res.status(500).json({ error: 'Failed to initiate payment.' });
   }

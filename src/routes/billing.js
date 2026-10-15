@@ -1,9 +1,13 @@
 const express = require('express');
+const mysql = require('mysql2/promise');
 const prisma  = require('../prisma');
 const { calculateTax }      = require('../services/taxService');
 const { postBillLinesToRoom, verifyPmsReservation } = require('../services/pmsPostingService');
 const { snapshotCurrencyAmount } = require('../services/exchangeRateService');
 const { checkPartitionAvailability } = require('../services/availabilityService');
+const { applyReservationPaymentCategory } = require('../services/paymentGuaranteeService');
+const { buildReservationChargeSummary, buildReservationPaymentSummary } = require('../services/extraChargeService');
+const { getPmsConnectionConfig } = require('../services/pmsService');
 
 const router = express.Router();
 
@@ -77,6 +81,29 @@ router.post('/:id/generate-bill', async (req, res) => {
       });
     }
 
+    const extraCharges = await prisma.extraCharge.findMany({
+      where: {
+        reservationId: slot.reservationId,
+        status: 'active',
+        billLineId: null,
+        OR: [
+          { dateSlotId: dateSlotId },
+          { dateSlotId: null },
+        ],
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    for (const extra of extraCharges) {
+      entries.push({
+        lineType: 'extra',
+        description: extra.description,
+        baseCharge: extra.isComplementary ? 0 : Number(extra.charge),
+        isComp: extra.isComplementary,
+        extraId: extra.id,
+      });
+    }
+
     // Compute tax and create bill lines in a single transaction
     const createdLines = await prisma.$transaction(async (tx) => {
       const lines = [];
@@ -107,6 +134,14 @@ router.post('/:id/generate-bill', async (req, res) => {
             userId: req.user.id,
           },
         });
+
+        if (entry.extraId) {
+          await tx.extraCharge.update({
+            where: { id: entry.extraId },
+            data: { billLineId: line.id },
+          });
+        }
+
         lines.push(line);
       }
       return lines;
@@ -216,20 +251,24 @@ router.get('/reservations/:id/folio', async (req, res) => {
           },
           orderBy: { fromDate: 'asc' },
         },
+        extraCharges: { orderBy: { createdAt: 'asc' } },
         deposits: { orderBy: { insertDate: 'desc' } },
+        paymentTransactions: { orderBy: { createdAt: 'desc' } },
       },
     });
     if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
 
-    // Flatten all lines across all date slots
     const allLines = reservation.dateSlots.flatMap(ds => ds.guestBillLines);
-    const totalBase    = allLines.reduce((s, l) => s + Number(l.charge), 0);
-    const totalTax     = allLines.reduce((s, l) => s + Number(l.taxAmount), 0);
-    const totalWithTax = allLines.reduce((s, l) => s + Number(l.chargeWithTax), 0);
+    const reservationChargeSummary = buildReservationChargeSummary({
+      billLines: allLines,
+      extraCharges: reservation.extraCharges,
+    });
 
-    const totalDeposits = reservation.deposits.reduce((s, d) => s + Number(d.amount), 0);
-    const settledDeposits = reservation.deposits.filter(d => d.settled).reduce((s, d) => s + Number(d.amount), 0);
-    const outstanding = Number((totalWithTax - settledDeposits).toFixed(2));
+    const reservationPaymentSummary = buildReservationPaymentSummary({
+      totalWithTax: reservationChargeSummary.totalWithTax,
+      deposits: reservation.deposits,
+      paymentTransactions: reservation.paymentTransactions,
+    });
 
     res.json({
       reservation: {
@@ -253,19 +292,98 @@ router.get('/reservations/:id/folio', async (req, res) => {
         billLines: ds.guestBillLines,
       })),
       summary: {
-        totalBaseCharge: Number(totalBase.toFixed(2)),
-        totalTax:        Number(totalTax.toFixed(2)),
-        totalWithTax:    Number(totalWithTax.toFixed(2)),
-        totalDeposits:   Number(totalDeposits.toFixed(2)),
-        settledDeposits: Number(settledDeposits.toFixed(2)),
-        outstandingBalance: outstanding,
+        totalBaseCharge: reservationChargeSummary.totalBaseCharge,
+        totalTax: reservationChargeSummary.totalTax,
+        totalWithTax: reservationChargeSummary.totalWithTax,
+        extraChargeTotal: reservationChargeSummary.extraChargeTotal,
+        pendingExtraChargeCount: reservationChargeSummary.pendingExtraChargeCount,
+        chargeBreakdown: reservationChargeSummary.chargeBreakdown,
+        totalDeposits: reservationPaymentSummary.totalDeposits,
+        settledDeposits: reservationPaymentSummary.settledDeposits,
+        capturedPayments: reservationPaymentSummary.capturedPayments,
+        pendingPaymentTotal: reservationPaymentSummary.pendingPaymentTotal,
+        pendingPaymentCount: reservationPaymentSummary.pendingPaymentCount,
+        totalReceived: reservationPaymentSummary.totalReceived,
+        outstandingBalance: reservationPaymentSummary.outstandingBalance,
       },
+      extraCharges: reservation.extraCharges,
       deposits: reservation.deposits,
+      paymentTransactions: reservation.paymentTransactions,
     });
   } catch (e) { console.error(e); res.status(500).json({ error: 'Failed to fetch folio' }); }
 });
 
 // ─── POST /api/banquet/reservations/:id/post-to-room ─────────────────────────
+
+router.get('/pms-reservations', async (req, res) => {
+  try {
+    const config = getPmsConnectionConfig();
+    if (!config) {
+      return res.status(503).json({ error: 'PMS connection is not configured' });
+    }
+
+    const conn = await mysql.createConnection(config);
+    try {
+      const [rows] = await conn.query(
+        `SELECT id, guest_id, status, room_id
+         FROM reservations
+         WHERE status = ?
+           AND guest_id IS NOT NULL
+           AND room_id IS NOT NULL
+         ORDER BY updated_at DESC, id DESC
+         LIMIT 50`,
+        ['in_house']
+      );
+
+      const results = [];
+      for (const reservation of rows) {
+        let guestLabel = 'Guest';
+        let roomLabel = reservation.room_id ? `Room ${reservation.room_id}` : `PMS ${reservation.id}`;
+        let roomNumber = reservation.room_id;
+
+        if (reservation.guest_id) {
+          const [guestRows] = await conn.query(
+            'SELECT full_name FROM guests WHERE id = ? LIMIT 1',
+            [reservation.guest_id]
+          );
+          const guest = guestRows[0];
+          if (guest) {
+            guestLabel = guest.full_name || 'Guest';
+          }
+        }
+
+        if (reservation.room_id) {
+          const [roomRows] = await conn.query(
+            'SELECT room_number FROM rooms WHERE id = ? LIMIT 1',
+            [reservation.room_id]
+          );
+          if (roomRows[0]?.room_number) {
+            roomNumber = roomRows[0].room_number;
+            roomLabel = `Room ${roomNumber}`;
+          }
+        }
+
+        results.push({
+          id: reservation.id,
+          status: reservation.status,
+          guestId: reservation.guest_id,
+          roomId: reservation.room_id,
+          guestName: guestLabel,
+          roomNumber,
+          label: `${roomLabel} — ${guestLabel} (${reservation.status})`,
+          displayText: `${roomLabel} • ${guestLabel} • ${reservation.status}`,
+        });
+      }
+
+      res.json(results);
+    } finally {
+      await conn.end();
+    }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Failed to load active PMS reservations' });
+  }
+});
 
 router.post('/reservations/:id/post-to-room', async (req, res) => {
   try {
@@ -361,13 +479,22 @@ router.post('/deposits', async (req, res) => {
         include: { reservation: { select: { reservationCode: true, status: true } } },
       });
 
-      // If eligible, promote tentative reservation to guaranteed
-      if (canPromote && reservation.status === 'tentative') {
-        await tx.banquetReservation.update({
-          where: { id: reservation.id },
-          data: { status: 'guaranteed' },
+      const currentReservation = await tx.banquetReservation.findUnique({
+        where: { id: reservation.id },
+        include: { dateSlots: { where: { status: 'active' } } },
+      });
+
+      if (currentReservation && canPromote && currentReservation.status === 'tentative') {
+        const result = await applyReservationPaymentCategory({
+          tx,
+          reservation: currentReservation,
+          category: 'advance',
+          amount: Number(amount),
+          userId: req.user?.id || 0,
+          paymentId: createdDeposit.id,
+          note: `Deposit recorded for ${paymentMethod}`,
         });
-        createdDeposit.reservation.status = 'guaranteed';
+        createdDeposit.reservation.status = result.changed ? 'guaranteed' : currentReservation.status;
       }
 
       return createdDeposit;
@@ -379,6 +506,9 @@ router.post('/deposits', async (req, res) => {
       guaranteeWarning,
     });
   } catch (e) {
+    if (e.statusCode) {
+      return res.status(e.statusCode).json({ error: e.message, conflicts: e.conflicts || [] });
+    }
     console.error(e);
     res.status(500).json({ error: 'Failed to create deposit' });
   }

@@ -9,8 +9,18 @@
  */
 const mysql  = require('mysql2/promise');
 const prisma = require('../prisma');
+const { isCurrentlyInHousePmsReservationStatus } = require('./pmsService');
 
 let _conn = null;
+
+function canPostChargesToPms({ hasUnpostedLines, outstandingBalance }) {
+  if (!hasUnpostedLines) return false;
+
+  // A settled folio can still be posted to PMS for reconciliation/audit purposes.
+  // Only the existence of unposted banquet lines should block the action.
+  const balance = Number(outstandingBalance ?? 0);
+  return Number.isFinite(balance) && hasUnpostedLines;
+}
 
 async function getEllaConnection() {
   if (_conn) {
@@ -39,8 +49,7 @@ async function verifyPmsReservation(pmsReservationId) {
   );
   if (!rows.length) throw Object.assign(new Error(`PMS reservation ${pmsReservationId} not found`), { statusCode: 404 });
   const r = rows[0];
-  // Allow checked-in or confirmed statuses
-  const active = ['confirmed', 'checked_in', 'in_house'].includes(r.status);
+  const active = isCurrentlyInHousePmsReservationStatus(r.status);
   if (!active) throw Object.assign(new Error(`PMS reservation ${pmsReservationId} has status '${r.status}' — cannot post charges`), { statusCode: 409 });
   return r;
 }
@@ -137,4 +146,4 @@ async function postBillLinesToRoom(banquetReservationId, pmsReservationId, userI
   return { posted, skipped, pmsReservationId };
 }
 
-module.exports = { verifyPmsReservation, postBillLinesToRoom };
+module.exports = { verifyPmsReservation, postBillLinesToRoom, canPostChargesToPms };

@@ -1,6 +1,7 @@
 const express = require('express');
 const prisma = require('../prisma');
 const { requireAdmin } = require('../middleware/auth');
+const { resolveMenuRateForDate } = require('../services/menuSelectionService');
 
 const router = express.Router();
 
@@ -16,15 +17,56 @@ const MENU_INCLUDE = {
 // ── GET /api/banquet/menus ────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const { isActive } = req.query;
+    const { isActive, availableOn } = req.query;
     const where = {};
     if (isActive !== undefined) where.isActive = isActive === 'true';
+
     const menus = await prisma.menu.findMany({
       where,
       include: MENU_INCLUDE,
       orderBy: { name: 'asc' },
     });
-    res.json(menus);
+
+    if (!availableOn) {
+      return res.json(menus);
+    }
+
+    const list = await Promise.all(menus.map(async (menu) => {
+      const rate = await resolveMenuRateForDate({
+        menuId: menu.id,
+        eventDate: availableOn,
+        findRate: async ({ menuId, eventDate }) => prisma.menuRate.findFirst({
+          where: {
+            menuId,
+            ratePlan: {
+              isActive: true,
+              fromDate: { lte: new Date(`${eventDate}T00:00:00.000Z`) },
+              toDate: { gte: new Date(`${eventDate}T00:00:00.000Z`) },
+            },
+          },
+          include: { ratePlan: true },
+        }),
+      });
+
+      if (rate) {
+        return {
+          id: menu.id,
+          name: menu.name,
+          rate: Number(rate.charge),
+          ratePlanId: rate.ratePlanId,
+        };
+      }
+
+      return {
+        id: menu.id,
+        name: menu.name,
+        rate: null,
+        ratePlanId: null,
+        reason: 'No rate plan for this date',
+      };
+    }));
+
+    res.json(list);
   } catch (e) {
     console.error('Error in GET /api/banquet/menus:', e && e.stack ? e.stack : e);
     res.status(500).json({ error: 'Failed to fetch menus', detail: e && e.message ? e.message : String(e) });

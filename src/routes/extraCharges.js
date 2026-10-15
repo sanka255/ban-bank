@@ -1,127 +1,303 @@
 const express = require('express');
 const prisma  = require('../prisma');
+const { requireAdmin, requireAdminOrFrontOffice } = require('../middleware/auth');
+const {
+  calculateExtraChargeAmounts,
+  validateExtraChargePayload,
+  buildExtraChargeSummary,
+} = require('../services/extraChargeService');
+const {
+  listExtraChargeItems,
+  searchExtraChargeItems,
+  createExtraChargeItem,
+  updateExtraChargeItem,
+  deleteExtraChargeItem,
+} = require('../services/extraChargeCatalogService');
 
 const router = express.Router({ mergeParams: true });
 
-// ─── GET /api/banquet/date-slots/:id/extra-charges ────────────────────────────
-router.get('/', async (req, res) => {
+function resolveReservationId(req = {}) {
+  const candidates = [
+    req?.params?.reservationId,
+    req?.params?.id,
+    req?.query?.reservationId,
+    req?.body?.reservationId,
+  ];
+
+  for (const value of candidates) {
+    if (value == null || value === '') continue;
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+
+  return null;
+}
+
+function getReservationId(req) {
+  return resolveReservationId(req);
+}
+
+function getDateSlotId(req) {
+  if (req.params.dateSlotId != null) return Number(req.params.dateSlotId);
+  if (req.params.id != null && req.originalUrl.includes('/date-slots/')) return Number(req.params.id);
+  if (req.query.dateSlotId != null) return Number(req.query.dateSlotId);
+  return null;
+}
+
+router.get('/', requireAdminOrFrontOffice, async (req, res) => {
   try {
-    const dateSlotId = Number(req.params.id);
+    if (req.originalUrl.includes('/extra-charge-items')) {
+      if (!req.user || !['admin', 'manager'].includes(req.user.role?.toLowerCase())) {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
+
+      const items = await listExtraChargeItems({
+        includeInactive: req.query.active === 'false' || req.query.includeInactive === 'true',
+        active: req.query.active != null ? req.query.active === 'true' : null,
+        search: req.query.q || req.query.search || '',
+        type: req.query.type || '',
+        limit: req.query.limit || 50,
+      });
+      return res.json(items);
+    }
+
+    const reservationId = getReservationId(req);
+    const dateSlotId = getDateSlotId(req);
+    const where = {};
+    if (reservationId) where.reservationId = reservationId;
+    if (dateSlotId) where.dateSlotId = dateSlotId;
+
     const extras = await prisma.extraCharge.findMany({
-      where: { dateSlotId },
+      where,
+      include: { dateSlot: true },
       orderBy: { createdAt: 'asc' },
     });
-    res.json(extras);
+
+    return res.json({
+      extras,
+      totals: buildExtraChargeSummary(extras),
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to fetch extra charges' });
   }
 });
 
-// ─── POST /api/banquet/date-slots/:id/extra-charges ───────────────────────────
-router.post('/', async (req, res) => {
+router.post('/', requireAdminOrFrontOffice, async (req, res) => {
   try {
-    const dateSlotId = Number(req.params.id);
-    const { category, description, quantity = 1, unitPrice, isComplementary = false, reason } = req.body;
+    if (req.originalUrl.includes('/extra-charge-items')) {
+      if (!req.user || !['admin', 'manager'].includes(req.user.role?.toLowerCase())) {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
 
-    if (!category || !description || unitPrice == null) {
-      return res.status(400).json({ error: 'category, description, and unitPrice are required' });
+      try {
+        const item = await createExtraChargeItem(req.body, req.user.id);
+        return res.status(201).json(item);
+      } catch (err) {
+        return res.status(400).json({ error: err.message || 'Failed to create extra charge item.' });
+      }
     }
-    if (isComplementary && !reason?.trim()) {
-      return res.status(400).json({ error: 'reason is required when isComplementary is true' });
+
+    const reservationId = getReservationId(req);
+    const dateSlotId = getDateSlotId(req);
+    const payload = { ...req.body };
+
+    if (!reservationId) {
+      return res.status(400).json({ error: 'reservationId is required.' });
     }
 
-    const slot = await prisma.banquetDateSlot.findUnique({ where: { id: dateSlotId } });
-    if (!slot) return res.status(404).json({ error: 'Date slot not found' });
+    const idemKey = (req.headers['idempotency-key'] || payload.idempotencyKey || '').toString().trim();
+    if (idemKey) {
+      const existing = await prisma.extraCharge.findFirst({
+        where: { idempotencyKey: idemKey, reservationId },
+      });
+      if (existing) {
+        return res.status(200).json(existing);
+      }
+    }
 
-    const qty = Number(quantity);
-    const price = Number(unitPrice);
-    const charge = isComplementary ? 0 : Number((qty * price).toFixed(2));
+    const validation = validateExtraChargePayload(payload);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
 
-    const extra = await prisma.extraCharge.create({
+    const reservation = await prisma.banquetReservation.findUnique({
+      where: { id: reservationId },
+      include: { dateSlots: true },
+    });
+    if (!reservation) return res.status(404).json({ error: 'Reservation not found' });
+    if (reservation.status === 'cancelled') {
+      return res.status(409).json({ error: 'Extra charges cannot be added to a cancelled reservation.' });
+    }
+
+    const row = calculateExtraChargeAmounts({
+      unitPrice: Number(payload.unitPrice || 0),
+      quantity: Number(payload.quantity || 1),
+      taxRate: Number(payload.taxRate || 0),
+      isComplementary: Boolean(payload.isComplementary),
+    });
+
+    const created = await prisma.extraCharge.create({
       data: {
-        dateSlotId,
-        category,
-        description: description.trim(),
-        quantity: qty,
-        unitPrice: price,
-        charge,
-        isComplementary: Boolean(isComplementary),
-        reason: isComplementary ? reason.trim() : null,
+        reservationId,
+        dateSlotId: dateSlotId || null,
+        catalogueItemId: payload.catalogueItemId ? Number(payload.catalogueItemId) : null,
+        chargeType: (payload.chargeType || payload.category || 'miscellaneous').toLowerCase(),
+        category: payload.category || (payload.chargeType || 'miscellaneous').toLowerCase(),
+        description: String(payload.description).trim(),
+        quantity: Number(payload.quantity || 1),
+        unitPrice: row.unitPrice,
+        charge: row.charge,
+        taxAmount: row.taxAmount,
+        chargeWithTax: row.chargeWithTax,
+        reason: payload.reason ? String(payload.reason).trim() : null,
+        explanation: payload.explanation ? String(payload.explanation).trim() : null,
+        isComplementary: Boolean(payload.isComplementary),
+        status: 'active',
+        createdBy: req.user.id,
+        idempotencyKey: idemKey || null,
       },
     });
 
-    res.status(201).json(extra);
+    return res.status(201).json(created);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: 'Failed to create extra charge' });
   }
 });
 
-// ─── PUT /api/banquet/date-slots/:id/extra-charges/:extraId ──────────────────
-router.put('/:extraId', async (req, res) => {
+router.put('/:id', requireAdminOrFrontOffice, async (req, res) => {
   try {
-    const dateSlotId = Number(req.params.id);
-    const extraId = Number(req.params.extraId);
+    if (req.originalUrl.includes('/extra-charge-items')) {
+      if (!req.user || !['admin', 'manager'].includes(req.user.role?.toLowerCase())) {
+        return res.status(403).json({ error: 'Admin access required.' });
+      }
 
-    // Billed integrity check (C5)
-    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
-    if (billedCount > 0) {
-      return res.status(409).json({
-        error: 'Cannot modify extra charge: a bill has already been generated for this date slot. Void or regenerate the bill first.',
-      });
+      try {
+        const item = await updateExtraChargeItem(req.params.id, req.body, req.user.id);
+        return res.json(item);
+      } catch (err) {
+        return res.status(404).json({ error: err.message || 'Extra charge item not found.' });
+      }
     }
 
+    const extraId = Number(req.params.id);
     const existing = await prisma.extraCharge.findUnique({ where: { id: extraId } });
     if (!existing) return res.status(404).json({ error: 'Extra charge not found' });
+    if (existing.billLineId != null || existing.status === 'voided') {
+      return res.status(409).json({ error: 'Only unbilled, active extras can be edited.' });
+    }
 
-    const { category, description, quantity, unitPrice, isComplementary, reason } = req.body;
-    const qty = quantity != null ? Number(quantity) : Number(existing.quantity);
-    const price = unitPrice != null ? Number(unitPrice) : Number(existing.unitPrice);
-    const willBeComp = isComplementary !== undefined ? Boolean(isComplementary) : existing.isComplementary;
-    const charge = willBeComp ? 0 : Number((qty * price).toFixed(2));
+    const nextPayload = {
+      ...(req.body.chargeType && { chargeType: String(req.body.chargeType).toLowerCase() }),
+      ...(req.body.description != null && { description: String(req.body.description).trim() }),
+      ...(req.body.unitPrice != null && { unitPrice: Number(req.body.unitPrice) }),
+      ...(req.body.quantity != null && { quantity: Number(req.body.quantity) }),
+      ...(req.body.reason != null && { reason: String(req.body.reason).trim() }),
+      ...(req.body.explanation != null && { explanation: String(req.body.explanation).trim() }),
+      ...(req.body.isComplementary != null && { isComplementary: Boolean(req.body.isComplementary) }),
+    };
+
+    const validation = validateExtraChargePayload({
+      ...existing,
+      ...nextPayload,
+    });
+
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error });
+    }
+
+    const row = calculateExtraChargeAmounts({
+      unitPrice: nextPayload.unitPrice ?? Number(existing.unitPrice),
+      quantity: nextPayload.quantity ?? Number(existing.quantity),
+      taxRate: 0,
+      isComplementary: nextPayload.isComplementary ?? Boolean(existing.isComplementary),
+    });
 
     const updated = await prisma.extraCharge.update({
       where: { id: extraId },
       data: {
-        ...(category && { category }),
-        ...(description && { description: description.trim() }),
-        quantity: qty,
-        unitPrice: price,
-        charge,
-        isComplementary: willBeComp,
-        reason: willBeComp ? (reason?.trim() || existing.reason) : null,
+        ...nextPayload,
+        charge: row.charge,
+        taxAmount: row.taxAmount,
+        chargeWithTax: row.chargeWithTax,
       },
     });
 
-    res.json(updated);
+    return res.json(updated);
   } catch (e) {
+    if (e.code === 'P2025') return res.status(404).json({ error: 'Extra charge item not found' });
     console.error(e);
     res.status(500).json({ error: 'Failed to update extra charge' });
   }
 });
 
-// ─── DELETE /api/banquet/date-slots/:id/extra-charges/:extraId ───────────────
-router.delete('/:extraId', async (req, res) => {
+router.post('/:extraId/void', requireAdminOrFrontOffice, async (req, res) => {
   try {
-    const dateSlotId = Number(req.params.id);
     const extraId = Number(req.params.extraId);
-
-    // Billed integrity check (C5)
-    const billedCount = await prisma.guestBillLine.count({ where: { dateSlotId } });
-    if (billedCount > 0) {
-      return res.status(409).json({
-        error: 'Cannot delete extra charge: a bill has already been generated for this date slot. Void or regenerate the bill first.',
-      });
+    const reason = String(req.body.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ error: 'Void reason is required.' });
     }
 
-    await prisma.extraCharge.delete({ where: { id: extraId } });
-    res.json({ message: 'Extra charge removed' });
+    const existing = await prisma.extraCharge.findUnique({ where: { id: extraId } });
+    if (!existing) return res.status(404).json({ error: 'Extra charge not found' });
+
+    const voided = await prisma.extraCharge.update({
+      where: { id: extraId },
+      data: {
+        status: 'voided',
+        voidReason: reason,
+        voidedBy: req.user.id,
+        voidedAt: new Date(),
+      },
+    });
+
+    res.json({
+      message: 'Extra charge voided successfully.',
+      extra: voided,
+    });
   } catch (e) {
-    if (e.code === 'P2025') return res.status(404).json({ error: 'Extra charge not found' });
     console.error(e);
-    res.status(500).json({ error: 'Failed to delete extra charge' });
+    res.status(500).json({ error: 'Failed to void extra charge' });
+  }
+});
+
+router.patch('/:id/active', requireAdmin, async (req, res) => {
+  try {
+    if (!req.originalUrl.includes('/extra-charge-items')) {
+      return res.status(404).json({ error: 'Route not found.' });
+    }
+
+    const item = await updateExtraChargeItem(req.params.id, { isActive: Boolean(req.body.isActive) }, req.user.id);
+    return res.json(item);
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Unable to update item active state.' });
+  }
+});
+
+router.delete('/:id', requireAdmin, async (req, res) => {
+  try {
+    if (!req.originalUrl.includes('/extra-charge-items')) {
+      return res.status(404).json({ error: 'Route not found.' });
+    }
+
+    const item = await deleteExtraChargeItem(req.params.id);
+    return res.json({ message: 'Extra charge item removed successfully.', item });
+  } catch (err) {
+    return res.status(404).json({ error: err.message || 'Extra charge item not found.' });
+  }
+});
+
+router.get('/search', requireAdmin, async (req, res) => {
+  try {
+    const items = await searchExtraChargeItems(req.query.search || '', req.query.includeInactive === 'true', req.query.type || '');
+    return res.json(items);
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Failed to search extra charge items.' });
   }
 });
 
 module.exports = router;
+module.exports.resolveReservationId = resolveReservationId;
+module.exports.router = router;

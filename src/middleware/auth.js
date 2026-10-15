@@ -56,6 +56,14 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function requireAdminOrFrontOffice(req, res, next) {
+  const role = req.user?.role?.toLowerCase();
+  if (!req.user || !['admin', 'front_office', 'front-office', 'manager', 'cashier'].includes(role)) {
+    return res.status(403).json({ error: 'Admin or front office access required' });
+  }
+  next();
+}
+
 function requireFinancialAccess(req, res, next) {
   if (!req.user || !['admin', 'cashier'].includes(req.user.role)) {
     return res.status(403).json({ error: 'Admin or cashier access required' });
@@ -63,4 +71,4 @@ function requireFinancialAccess(req, res, next) {
   next();
 }
 
-module.exports = { authenticateToken, requireAdmin, requireFinancialAccess };
+module.exports = { authenticateToken, requireAdmin, requireAdminOrFrontOffice, requireFinancialAccess };

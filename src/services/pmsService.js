@@ -1,5 +1,10 @@
 const mysql = require('mysql2/promise');
 
+function isCurrentlyInHousePmsReservationStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return normalized === 'in_house';
+}
+
 function getPmsConnectionConfig() {
   const dbUrl = process.env.ELLA_PMS_DATABASE_URL;
   if (!dbUrl) return null;
@@ -30,8 +35,7 @@ async function getActivePmsReservation(reservationId) {
     const reservation = rows && rows[0] ? rows[0] : null;
     if (!reservation) return null;
 
-    const activeStatuses = ['tentative', 'guaranteed', 'room_assigned', 'checked_in', 'in_house', 'due_checkout', 'confirmed', 'do_check_in'];
-    if (activeStatuses.includes(String(reservation.status))) return reservation;
+    if (isCurrentlyInHousePmsReservationStatus(reservation.status)) return reservation;
     return null;
   } catch (error) {
     console.warn('Could not verify room reservation in Ella PMS.', error.message);
@@ -90,4 +94,9 @@ async function ensureGuestChargeExists({ pmsReservationId, billLine, userId }) {
   }
 }
 
-module.exports = { getPmsConnectionConfig, getActivePmsReservation, ensureGuestChargeExists };
+module.exports = {
+  getPmsConnectionConfig,
+  getActivePmsReservation,
+  ensureGuestChargeExists,
+  isCurrentlyInHousePmsReservationStatus,
+};

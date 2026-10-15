@@ -20,6 +20,7 @@ const menuItemsRouter         = require('./routes/menuItems');
 const menusRouter             = require('./routes/menus');
 const menuRatePlansRouter     = require('./routes/menuRatePlans');
 const billingRouter           = require('./routes/billing');
+const paymentsRouter          = require('./routes/payments');
 const currenciesRouter        = require('./routes/currencies');
 const exchangeRatesRouter     = require('./routes/exchangeRates');
 const extraChargesRouter      = require('./routes/extraCharges');
@@ -50,7 +51,6 @@ app.use('/api/banquet/function-accounts', functionAccountsRouter);
 app.use('/api/banquet/availability',      availabilityRouter);
 
 // Sprint 2
-app.use('/api/banquet/reservations',       reservationsRouter);
 app.use('/api/banquet/date-slots',         dateSlotsRouter);
 app.use('/api/banquet/date-slots',         dateSlotItemsRouter);   // /:id/requested-items & /:id/requested-menus
 app.use('/api/banquet/cancellation-tiers', cancellationTiersRouter);
@@ -65,6 +65,8 @@ app.use('/api/banquet/menu-rate-plans',  menuRatePlansRouter);
 // Sprint 4 — billing: mounts at /date-slots (for generate-bill) and /reservations (for folio/post-to-room) and /deposits
 app.use('/api/banquet/date-slots',   billingRouter);  // POST /:id/generate-bill, /:id/regenerate-bill
 app.use('/api/banquet',              billingRouter);  // GET /reservations/:id/folio, POST /reservations/:id/post-to-room, GET/POST /deposits, PUT /deposits/:id/settle
+app.use('/api/banquet',              paymentsRouter); // payment initiation, mock flows, refunds, and guarantee transition logic
+app.use('/api/banquet/reservations', reservationsRouter);
 
 // Sprint 8 — multi-currency
 app.use('/api/banquet/currencies', currenciesRouter);
@@ -72,6 +74,9 @@ app.use('/api/banquet/exchange-rates', exchangeRatesRouter);
 
 // Sprint 5, 6, 7 — Lifecycle, BEO, Extras, Discounts, Packages
 app.use('/api/banquet/date-slots/:id/extra-charges', extraChargesRouter);
+app.use('/api/banquet/reservations/:id/extra-charges', extraChargesRouter);
+app.use('/api/banquet/extra-charges', extraChargesRouter);
+app.use('/api/banquet/extra-charge-items', extraChargesRouter);
 app.use('/api/banquet/reservations/:id/discounts',   discountsRouter);
 app.use('/api/banquet/packages',                     packagesRouter);
 app.use('/api/banquet/reservations/:id/beo',         beoRouter);
